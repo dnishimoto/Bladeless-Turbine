@@ -2,11 +2,6 @@
 //  DataStructures.swift
 //  Bladeless Turbine
 //
-//  Created by David Nishimoto on 11/9/26.
-//
-//  DataStructures.swift
-//  Bladeless Turbine
-//
 //  Shared value types for the cellular-automaton jet engine: configuration,
 //  gas particles, engine stage labels and a fast RNG.
 //

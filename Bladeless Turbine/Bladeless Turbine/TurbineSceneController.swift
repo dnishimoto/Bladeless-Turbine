@@ -14,6 +14,11 @@
 //  hot gas is drawn larger to show expansion.
 //
 
+//
+//  TurbineSceneController.swift
+//  Bladeless Turbine
+//
+
 import SwiftUI
 import Combine
 import SceneKit
@@ -21,7 +26,6 @@ import UIKit
 
 final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, ObservableObject {
 
-    // HUD state (published at ~8 Hz)
     @Published var stations: [PressureStation] = []
     @Published var rpm: Float = 0
     @Published var shaftPercent: Float = 0
@@ -59,8 +63,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     private var accumulator: Float = 0
     private var hudTimer: Float = 0
 
-    // MARK: Init
-
     init(config: TurbineConfig = TurbineConfig()) {
         cfg = config
         sim = TurbineCA(config: config)
@@ -69,8 +71,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         buildScene()
         stations = sim.stations
     }
-
-    // MARK: Controls
 
     func setFuel(_ v: Float) { sim.fuel = v }
     func setPressureRatio(_ v: Float) { sim.designPressureRatio = v }
@@ -83,8 +83,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         for i in 0..<lastBand.count { lastBand[i] = -1 }
     }
 
-    // MARK: Materials
-
     private func metal(alpha: CGFloat, white: CGFloat = 0.6) -> SCNMaterial {
         let m = SCNMaterial()
         m.lightingModel = .physicallyBased
@@ -95,8 +93,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         m.transparency = alpha
         return m
     }
-
-    // MARK: Scene construction
 
     private func buildScene() {
         scene.background.contents = UIColor(red: 0.02, green: 0.02, blue: 0.05, alpha: 1)
@@ -130,8 +126,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         buildParticles()
     }
 
-    // MARK: Tesla turbine
-
     private func buildTurbine() {
         scene.rootNode.addChildNode(diskSpin)
 
@@ -141,16 +135,14 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         solid.materials = [diskMaterial]
         drilled.materials = [diskMaterial]
 
-        // Disc 0 is a solid end cap; discs 1... have three openings each.
         for i in 0..<cfg.diskCount {
             let node = SCNNode(geometry: i == 0 ? solid : drilled)
-            node.eulerAngles.x = -.pi / 2          // shape XY plane → world XZ, extrude along +Y
+            node.eulerAngles.x = -.pi / 2
             node.position.y = sim.diskY(i)
             node.renderingOrder = 5
             diskSpin.addChildNode(node)
         }
 
-        // Common shaft (continues below the stack to the drive train)
         let shaftBottom: Float = -0.62
         let shaftTop = sim.diskY(cfg.diskCount - 1) + 0.05
         let shaft = SCNCylinder(radius: CGFloat(cfg.hubRadius), height: CGFloat(shaftTop - shaftBottom))
@@ -159,7 +151,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         shaftNode.position.y = (shaftTop + shaftBottom) / 2
         diskSpin.addChildNode(shaftNode)
 
-        // Stationary end plates; the top ring's open centre feeds the exhaust collector.
         let plateMat = SCNMaterial()
         plateMat.diffuse.contents = UIColor(red: 0.12, green: 0.14, blue: 0.2, alpha: 1)
         plateMat.transparency = 0.7
@@ -177,15 +168,12 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         topNode.position.y = shaftTop - 0.0
         scene.rootNode.addChildNode(topNode)
 
-        // Outer inlet manifold: a faint shroud around the rim of the disc stack.
         let stackH = CGFloat(Float(cfg.diskCount) * cfg.pitch)
         let shroud = SCNTube(innerRadius: CGFloat(cfg.diskRadius + 0.03),
                              outerRadius: CGFloat(cfg.diskRadius + 0.055), height: stackH)
         shroud.firstMaterial = metal(alpha: 0.12, white: 0.5)
         scene.rootNode.addChildNode(SCNNode(geometry: shroud))
     }
-
-    // MARK: Inlet → compressor → combustor → tangential manifold
 
     private func buildFrontEngine() {
         let L = cfg.jetCellLength
@@ -214,22 +202,18 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             engine.addChildNode(n)
         }
 
-        // Air inlet (cells 0-2)
         zTube(radius: 0.19, from: 0, to: 2, material: casing)
 
-        // Compressor casing tapers toward the combustor (cells 2-6)
         let comp = SCNCone(topRadius: 0.15, bottomRadius: 0.19, height: CGFloat(4 * L))
         comp.firstMaterial = casing
         let compNode = SCNNode(geometry: comp)
-        compNode.eulerAngles.x = -.pi / 2           // narrow end toward the turbine (−Z)
+        compNode.eulerAngles.x = -.pi / 2
         compNode.position = SCNVector3(0, 0, (d(2) + d(6)) / 2)
         compNode.renderingOrder = 5
         engine.addChildNode(compNode)
 
-        // Combustor can (cells 6-12), glows with the flame
         zTube(radius: 0.17, from: 6, to: 12, material: combustorMaterial)
 
-        // Fuel injectors
         injectorMaterial.diffuse.contents = UIColor(white: 0.2, alpha: 1)
         injectorMaterial.emission.contents = UIColor(red: 1.0, green: 0.6, blue: 0.1, alpha: 1)
         injectorMaterial.emission.intensity = 0
@@ -241,7 +225,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             engine.addChildNode(n)
         }
 
-        // Manifold: round combustor flattening into a tall, thin tangential slot (cells 12-16)
         let len = CGFloat(4 * L)
         let slotPath = UIBezierPath()
         slotPath.move(to: CGPoint(x: 0, y: -CGFloat(sim.stackHalfSpan)))
@@ -252,11 +235,10 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         let slot = SCNShape(path: slotPath, extrusionDepth: 0.1)
         slot.firstMaterial = casing
         let slotNode = SCNNode(geometry: slot)
-        slotNode.eulerAngles.y = -.pi / 2           // local X → world +Z (distance upstream of the rim)
+        slotNode.eulerAngles.y = -.pi / 2
         slotNode.renderingOrder = 5
         engine.addChildNode(slotNode)
 
-        // Nose cone and fan at the intake
         let nose = SCNCone(topRadius: 0, bottomRadius: 0.12, height: 0.16)
         nose.firstMaterial = metal(alpha: 1, white: 0.5)
         let noseNode = SCNNode(geometry: nose)
@@ -276,7 +258,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             fanSpin.addChildNode(blade)
         }
 
-        // Compressor rotor: hub shaft and four bladed stages, spun by the shared shaft
         let rotorHolder = SCNNode()
         rotorHolder.eulerAngles.x = .pi / 2
         rotorHolder.position = SCNVector3(0, 0, (d(2) + d(6)) / 2)
@@ -299,13 +280,10 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 
-    // MARK: Exhaust collector → rear nozzle
-
     private func buildRearExhaust() {
         let mat = metal(alpha: 0.3)
         let topY = sim.diskY(cfg.diskCount - 1) + 0.05
 
-        // Collector funnel above the central exhaust openings
         let funnel = SCNCone(topRadius: 0.24, bottomRadius: 0.58, height: CGFloat(0.80 - topY))
         funnel.firstMaterial = mat
         let funnelNode = SCNNode(geometry: funnel)
@@ -313,7 +291,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         funnelNode.renderingOrder = 5
         scene.rootNode.addChildNode(funnelNode)
 
-        // Elbow turning the exhaust rearward
         let elbow = SCNSphere(radius: 0.25)
         elbow.firstMaterial = mat
         let elbowNode = SCNNode(geometry: elbow)
@@ -321,11 +298,10 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         elbowNode.renderingOrder = 5
         scene.rootNode.addChildNode(elbowNode)
 
-        // Convergent rear nozzle
         let nozzle = SCNCone(topRadius: 0.105, bottomRadius: 0.225, height: 1.6)
         nozzle.firstMaterial = mat
         let nozzleNode = SCNNode(geometry: nozzle)
-        nozzleNode.eulerAngles.x = -.pi / 2         // narrow end toward −Z
+        nozzleNode.eulerAngles.x = -.pi / 2
         nozzleNode.position = SCNVector3(0, 0.80, -1.15)
         nozzleNode.renderingOrder = 5
         scene.rootNode.addChildNode(nozzleNode)
@@ -338,14 +314,12 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         scene.rootNode.addChildNode(lipNode)
     }
 
-    // MARK: Drive shaft: Tesla rotor → compressor
-
     private func buildDriveShaft() {
         let mat = metal(alpha: 1, white: 0.4)
         let y: Float = -0.62
         let x = sim.jetX
         let L = cfg.jetCellLength
-        let zc = (Float(cfg.chainACells - 2) + Float(cfg.chainACells - 6)) * L / 2   // compressor rotor centre
+        let zc = (Float(cfg.chainACells - 2) + Float(cfg.chainACells - 6)) * L / 2
 
         func rod(_ node: SCNNode, radius: CGFloat, height: CGFloat) -> SCNNode {
             let cyl = SCNCylinder(radius: radius, height: height)
@@ -353,22 +327,18 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             node.geometry = cyl
             return node
         }
-        // along X: Tesla shaft foot → compressor line
         let a = rod(SCNNode(), radius: 0.03, height: CGFloat(x))
         a.eulerAngles.z = .pi / 2
         a.position = SCNVector3(x / 2, y, 0)
         scene.rootNode.addChildNode(a)
-        // along Z: beneath the combustor to the compressor
         let b = rod(SCNNode(), radius: 0.03, height: CGFloat(zc))
         b.eulerAngles.x = .pi / 2
         b.position = SCNVector3(x, y, zc / 2)
         scene.rootNode.addChildNode(b)
-        // riser up to the compressor hub
         let c = rod(SCNNode(), radius: 0.03, height: CGFloat(-y))
         c.position = SCNVector3(x, y / 2, zc)
         scene.rootNode.addChildNode(c)
 
-        // Bevel-gear boxes at the three corners
         for p in [SCNVector3(0, y, 0), SCNVector3(x, y, 0), SCNVector3(x, y, zc), SCNVector3(x, 0, zc)] {
             let box = SCNBox(width: 0.1, height: 0.1, length: 0.1, chamferRadius: 0.02)
             box.firstMaterial = metal(alpha: 1, white: 0.3)
@@ -378,14 +348,12 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 
-    // MARK: Gas particles
-
     private func buildParticles() {
         let colors: [UIColor] = [
-            UIColor(red: 1.00, green: 0.95, blue: 0.70, alpha: 1),   // white-hot
+            UIColor(red: 1.00, green: 0.95, blue: 0.70, alpha: 1),
             UIColor(red: 1.00, green: 0.60, blue: 0.15, alpha: 1),
             UIColor(red: 0.90, green: 0.20, blue: 0.08, alpha: 1),
-            UIColor(red: 0.35, green: 0.55, blue: 0.95, alpha: 1)    // cold intake air / spent gas
+            UIColor(red: 0.35, green: 0.55, blue: 0.95, alpha: 1)
         ]
         for c in colors {
             let s = SCNSphere(radius: 0.012)
@@ -409,14 +377,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         scene.rootNode.addChildNode(holder)
     }
 
-    // MARK: Disc geometry – annulus with a shaft bore and three sector openings
-
     static func diskGeometry(_ cfg: TurbineConfig, withHoles: Bool) -> SCNShape {
         let path = UIBezierPath()
         let outer = CGFloat(cfg.diskRadius)
         let bore = CGFloat(cfg.hubRadius)
 
-        // Outer rim winds one way; bore and openings wind the other so SceneKit treats them as holes.
         path.append(UIBezierPath(arcCenter: .zero, radius: outer,
                                  startAngle: 0, endAngle: 2 * .pi, clockwise: true))
         path.append(UIBezierPath(arcCenter: .zero, radius: bore,
@@ -446,8 +411,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         return shape
     }
 
-    // MARK: Render loop
-
     private func band(for temp: Float) -> Int8 {
         temp > 1200 ? 0 : temp > 900 ? 1 : temp > 600 ? 2 : 3
     }
@@ -465,13 +428,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
         let alpha = accumulator / tickDt
 
-        // Disc stack, compressor rotor and fan all turn with the single shaft angle.
         let angle = sim.diskAngle + sim.omega * accumulator
         diskSpin.eulerAngles.y = angle
         compressorSpin.eulerAngles.y = angle
         fanSpin.eulerAngles.y = angle
 
-        // Flame glow follows the CA's combustor temperature; injectors follow the fuel command.
         combustorMaterial.emission.intensity = CGFloat(max(0, min(1, (sim.flameTemp - 300) / 1500)))
         injectorMaterial.emission.intensity = CGFloat(sim.fuel)
 

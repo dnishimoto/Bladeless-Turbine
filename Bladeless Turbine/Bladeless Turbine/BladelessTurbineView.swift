@@ -1,9 +1,9 @@
 //
-//  ContentView.swift
+//  BladelessTurbineView.swift
 //  Bladeless Turbine
 //
-//  SwiftUI front end: the 3D engine scene plus a live pressure overlay driven by
-//  the cellular automaton.
+//  SwiftUI front end: the 3D engine scene, telemetry HUD, pressure overlay,
+//  stage counts and engine controls.
 //
 
 import SwiftUI
@@ -18,7 +18,7 @@ struct TurbineSceneView: UIViewRepresentable {
         view.pointOfView = controller.cameraNode
         view.delegate = controller
         view.allowsCameraControl = true
-        view.isPlaying = true                       // keep the render loop (and CA) running
+        view.isPlaying = true
         view.preferredFramesPerSecond = 60
         view.antialiasingMode = .multisampling4X
         view.backgroundColor = .black
@@ -28,7 +28,7 @@ struct TurbineSceneView: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {}
 }
 
-// MARK: - Pressure overlay
+// MARK: - Pressure Overlay
 
 struct PressureOverlay: View {
     let stations: [PressureStation]
@@ -77,41 +77,7 @@ struct PressureOverlay: View {
     }
 }
 
-// MARK: - Stage populations (where the CA's gas is right now)
-
-struct StageBar: View {
-    let counts: [Int]
-
-    var body: some View {
-        let total = max(1, counts.reduce(0, +))
-        VStack(alignment: .leading, spacing: 4) {
-            Text("GAS BY STAGE")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-            ForEach(EngineStage.allCases) { stage in
-                let n = stage.rawValue < counts.count ? counts[stage.rawValue] : 0
-                HStack(spacing: 6) {
-                    Text(stage.title)
-                        .frame(width: 128, alignment: .leading)
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(.white.opacity(0.12))
-                            Capsule().fill(Color(stage.color))
-                                .frame(width: max(2, geo.size.width * CGFloat(n) / CGFloat(total)))
-                        }
-                    }
-                    .frame(width: 70, height: 6)
-                    Text("\(n)").frame(width: 34, alignment: .trailing)
-                }
-                .font(.system(size: 10, design: .monospaced))
-            }
-        }
-        .padding(10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-// MARK: - Main view
+// MARK: - Main View
 
 struct BladelessTurbineView: View {
     @StateObject private var controller = TurbineSceneController()
@@ -124,24 +90,20 @@ struct BladelessTurbineView: View {
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 8) {
+                // Header Telemetry & Pressure Overlay
                 HStack(alignment: .top, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        PressureOverlay(stations: controller.stations,
-                                        ambient: controller.cfg.ambientPressure)
-                        StageBar(counts: controller.stageCounts)
-                    }
+                    PressureOverlay(stations: controller.stations,
+                                    ambient: controller.cfg.ambientPressure)
 
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Tesla-Turbine Jet").font(.headline)
                         Text(String(format: "Shaft     %5.0f rpm  (%.0f%%)", controller.rpm, controller.shaftPercent))
                         Text(String(format: "Flame     %5.0f K", controller.flameTemp))
-                        Text(String(format: "Press.ratio %4.2f : 1", controller.pressureRatio))
                         Text(String(format: "Fuel      %5.1f g/s", controller.fuelFlow))
                         Text(String(format: "Fuel used %5.1f g", controller.fuelUsed))
-                        Text(String(format: "Exit vel. %5.0f m/s", controller.exhaustVelocity))
-                        Text(String(format: "Mass flow %5.2f kg/s", controller.massFlow))
-                        Text(String(format: "Thrust    %5.0f N", controller.thrust))
-                        Text(String(format: "TSFC      %5.0f g/kN·s", controller.tsfc))
+                        Text(String(format: "Thrust    %5.1f N", controller.thrust))
+                        Text(String(format: "Exhaust   %5.0f m/s", controller.exhaustVelocity))
+                        Text(String(format: "PR        %5.1f×", controller.pressureRatio))
                         Text(String(format: "Turbine τ  %4.2f", controller.turbineTorque))
                         Text(String(format: "Compr. τ   %4.2f", controller.compressorLoad))
                         Text("Gas parts  \(controller.activeCount)")
@@ -158,18 +120,44 @@ struct BladelessTurbineView: View {
 
                 Spacer()
 
-                HStack(spacing: 12) {
-                    Button("Start") { controller.startEngine() }
-                        .buttonStyle(.borderedProminent)
-                    Text("Fuel")
-                    Slider(value: $fuel, in: 0...1)
-                        .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
-                    Text(String(format: "PR %.1f", pressureRatio))
-                        .font(.system(size: 12, design: .monospaced))
-                    Slider(value: $pressureRatio, in: 2...8)
-                        .onChange(of: pressureRatio) { _, v in controller.setPressureRatio(Float(v)) }
-                    Button("Reset") { controller.reset() }
-                        .buttonStyle(.bordered)
+                // Stage Particle Count Indicator
+                HStack(spacing: 8) {
+                    ForEach(Array(EngineStage.allCases.enumerated()), id: \.offset) { idx, stage in
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color(uiColor: stage.color))
+                                .frame(width: 8, height: 8)
+                            Text("\(stage.title): \(controller.stageCounts.indices.contains(idx) ? controller.stageCounts[idx] : 0)")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        }
+                    }
+                }
+                .padding(8)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+
+                // Bottom Controls
+                VStack(spacing: 8) {
+                    HStack(spacing: 12) {
+                        Button("Start Engine") { controller.startEngine() }
+                            .buttonStyle(.borderedProminent)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Fuel / Throttle: \(Int(fuel * 100))%")
+                                .font(.caption2.monospaced())
+                            Slider(value: $fuel, in: 0...1)
+                                .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Design PR: \(String(format: "%.1f", pressureRatio))×")
+                                .font(.caption2.monospaced())
+                            Slider(value: $pressureRatio, in: 1.5...8.0, step: 0.5)
+                                .onChange(of: pressureRatio) { _, v in controller.setPressureRatio(Float(v)) }
+                        }
+
+                        Button("Reset") { controller.reset() }
+                            .buttonStyle(.bordered)
+                    }
                 }
                 .padding(12)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
