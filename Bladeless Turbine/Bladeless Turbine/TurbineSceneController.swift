@@ -304,6 +304,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
         let alpha = accumulator / tickDt
 
+        // Animate rotor and fan spin angles
         let angle = sim.diskAngle + sim.omega * accumulator
         turbineSpinNode.eulerAngles.z = angle
         compressorSpinNode.eulerAngles.z = angle
@@ -316,7 +317,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         for i in 0..<particles.count {
             let p = particles[i]
             let node = particleNodes[i]
-            if p.stage == .free {
+            if !p.active {
                 if !node.isHidden { node.isHidden = true }
                 continue
             }

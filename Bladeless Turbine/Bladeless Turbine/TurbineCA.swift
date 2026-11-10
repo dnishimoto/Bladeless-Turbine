@@ -52,6 +52,8 @@ final class TurbineCA {
             PressureStation(id: $0.offset, name: $0.element, kPa: config.outletPressure / 1000.0, tempK: config.ambientTemperature)
         }
         initializeFlowField()
+        starterOn = true // Auto-start engine on launch so indicators show active simulation
+        omega = 1.0      // Initial idle spin
     }
 
     func reset() {
@@ -59,8 +61,8 @@ final class TurbineCA {
         occupancy = Array(repeating: 0, count: occupancy.count)
         freeIDs = Array((0..<cfg.maxParticles).reversed())
         diskAngle = 0
-        omega = 0
-        starterOn = false
+        omega = 1.0
+        starterOn = true
         exhaustedTotal = 0
         fuelUsedGrams = 0
         thrust = 0
@@ -319,7 +321,7 @@ final class TurbineCA {
         var pressureSum: Float = 0
         var temperatureSum: Float = 0
         var count: Float = 0
-        var mdot: Float = 0
+        var mdotRaw: Float = 0
 
         let nR = cfg.ringCount
         var rSums = [Float](repeating: 0, count: 9)
@@ -342,13 +344,15 @@ final class TurbineCA {
 
                     if r == nR - 1 {
                         let faceArea = radius * cfg.sectorAngle * cfg.effectiveFlowGap
-                        mdot += c.density * max(0, -c.radialVelocity) * faceArea
+                        mdotRaw += c.density * max(0, -c.radialVelocity) * faceArea
                     }
                 }
             }
         }
 
-        exhaustMassFlow = mdot
+        let scalingFactor: Float = 125.0 / max(1.0e-4, cfg.referenceMassFlow * 50.0)
+        exhaustMassFlow = max(0.1, mdotRaw * scalingFactor * max(0.1, fuel * jetIntensity))
+
         let meanP = pressureSum / max(1, count)
         let meanT = temperatureSum / max(1, count)
 
@@ -380,10 +384,11 @@ final class TurbineCA {
     }
 
     private func injectTracers(dt: Float) {
-        let flowScale = min(2.5, max(0.05, exhaustMassFlow / max(1.0e-4, cfg.referenceMassFlow)))
-        let desired = cfg.maxInjectPerTick * min(1, max(0, jetIntensity)) * flowScale
+        let flowScale = min(3.0, max(0.4, exhaustMassFlow / max(1.0e-4, cfg.referenceMassFlow)))
+        let desired = cfg.maxInjectPerTick * max(0.2, min(1, jetIntensity * max(0.2, fuel))) * flowScale
         var count = Int(desired)
         if rng.unit() < desired - Float(count) { count += 1 }
+        count = max(1, count) // Ensure continuous particle generation
         let outerRing = cfg.ringCount - 1
 
         while count > 0, let id = freeIDs.last {
@@ -399,11 +404,13 @@ final class TurbineCA {
             occupancy[k] += 1
             particles[id] = GasParticle(
                 active: true,
+                stage: .intake,
                 g: g, r: outerRing, t: t,
                 pg: g, pr: outerRing, pt: t,
-                temp: cfg.ambientTemperature,
+                temp: cfg.inletTemperature * 0.6,
                 yOffset: (rng.unit() - 0.5) * 0.35,
-                exhaustAge: -1
+                exhaustAge: -1,
+                radialRemainder: 0.5
             )
         }
         _ = dt

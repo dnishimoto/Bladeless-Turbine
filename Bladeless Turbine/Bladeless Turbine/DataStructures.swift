@@ -11,6 +11,19 @@ import SceneKit
 
 
 struct TurbineConfig {
+    
+    var inletPressure: Float = 145_000         // High ram-air total pressure recovery at the face
+    var outletPressure: Float = 101_325
+    var ambientPressure: Float = 101.325
+    var axialPressureDrop: Float = 350.0       // High-speed pressure drop across core stages
+    
+    // High-speed flow parameters matching fighter intake velocity profiles
+    var maxRadialSpeed: Float = 220.0          // High axial/radial ingestion speed (~Mach 0.6–0.8 face velocity)
+    var maxTangentialSpeed: Float = 180.0
+    var inletTangentialSpeed: Float = 80.0     // Intensive fan/compressor face swirl component
+    
+    // Scaled mass flow reference matching ~112 kg/s class engine core
+    var referenceMassFlow: Float = 0.12
 
     // MARK: Rotor Geometry
 
@@ -48,15 +61,7 @@ struct TurbineConfig {
     var gasConstant: Float = 287.05
     var gamma: Float = 1.4
 
-    // MARK: Pressure & Engine Boundaries
-
-    var inletPressure: Float = 102_525
-    var outletPressure: Float = 101_325
-    var ambientPressure: Float = 101.325 // kPa equivalent or reference
-    var axialPressureDrop: Float = 120
-
-    // MARK: Temperature Boundaries
-
+   
     var inletTemperature: Float = 950
     var ambientTemperature: Float = 288.15
 
@@ -68,20 +73,14 @@ struct TurbineConfig {
 
     var effectiveFlowGap: Float = 0.0008
     var thermalDiffusivity: Float = 2.2e-5
-    var maxRadialSpeed: Float = 35
-    var maxTangentialSpeed: Float = 35
-    var inletTangentialSpeed: Float = 5
-
+   
     // MARK: Rotor Mechanics
 
     var rotorInertia: Float = 0.08
     var rotorDrag: Float = 0.08
     var diskFriction: Float = 0.08
  
-    // MARK: Visual Flow Rate
-
-    var referenceMassFlow: Float = 0.02
-
+ 
     // MARK: Derived Mesh Values
 
     var gapCount: Int {
@@ -99,6 +98,7 @@ struct TurbineConfig {
 
  
 }
+
 
 // MARK: - Gas Particle
 
