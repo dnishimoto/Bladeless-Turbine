@@ -51,39 +51,39 @@ final class TurbineCA {
 
     private let chainA: FlowChain
     private let chainB: FlowChain
-    private var occ: [Int]                  // turbine cells
-    private var ringP: [Float]              // smoothed pressure per ring (all gaps)
-    private var gapP: [Float]               // smoothed pressure of the opening zone per gap (+ collector)
+    private var occ: [Int]
+    private var ringP: [Float]
+    private var gapP: [Float]
     private var rimPressure: Float
     private let holeRingCount: Int
 
-    private(set) var diskAngle: Float = 0   // CA angle of opening #0
-    private(set) var omega: Float = 0       // shaft speed, rad/s
+    private(set) var diskAngle: Float = 0
+    private(set) var omega: Float = 0
     private(set) var starterOn = false
     private(set) var exhaustedTotal = 0
     private(set) var fuelUsedGrams: Float = 0
-    private(set) var thrust: Float = 0             // N, from the CA's exhaust mass flow × nozzle exit velocity
-    private(set) var exhaustVelocity: Float = 0    // m/s, isentropic expansion from the collector pressure
-    private(set) var exhaustMassFlow: Float = 0    // kg/s
+    private(set) var thrust: Float = 0
+    private(set) var exhaustVelocity: Float = 0
+    private(set) var exhaustMassFlow: Float = 0
     private(set) var turbineTorque: Float = 0
     private(set) var compressorLoad: Float = 0
     private(set) var stations: [PressureStation]
     private(set) var stageCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
     private var exhaustThisTick = 0
-    private var exhaustRate: Float = 0             // particles per second (smoothed)
-    private var stageHeat: Float = 0               // per-stage compression temperature gain
+    private var exhaustRate: Float = 0
+    private var stageHeat: Float = 0
 
     var fuel: Float = 0.6
     var designPressureRatio: Float = TurbineConfig().defaultPressureRatio
 
-    static let stationNames = ["Air inlet", "Compressor exit", "Combustor", "Manifold",
-                               "Turbine rim", "Mid disc", "Hub ports", "Collector", "Rear nozzle"]
+    static let stationNames = ["1. Air Inlet", "2. Compressor Exit", "3. Combustor", "4. Manifold",
+                               "5. Turbine Rim", "6. Mid Disc", "7. Hub Ports", "8. Collector", "9. Rear Nozzle"]
 
     static let chainAKinds: [CellKind] = [
-        .inlet, .inlet,                                                  // 0-1   air inlet
-        .compressor, .compressor, .compressor, .compressor,              // 2-5   compressor stages
-        .combustor, .combustor, .combustor, .combustor, .combustor, .combustor,   // 6-11  combustor
-        .manifold, .manifold, .manifold, .manifold                       // 12-15 tangential manifold
+        .inlet, .inlet,
+        .compressor, .compressor, .compressor, .compressor,
+        .combustor, .combustor, .combustor, .combustor, .combustor, .combustor,
+        .manifold, .manifold, .manifold, .manifold
     ]
     static let chainAVolumes: [Float] = [
         2, 2,
@@ -92,14 +92,14 @@ final class TurbineCA {
         0.5, 0.5, 0.5, 0.5
     ]
     static let chainBKinds: [CellKind] = [
-        .collector, .collector, .collector,                              // 0-2 exhaust collector
-        .nozzle, .nozzle, .nozzle, .nozzle, .nozzle, .nozzle, .nozzle    // 3-9 rear nozzle
+        .collector, .collector, .collector,
+        .nozzle, .nozzle, .nozzle, .nozzle, .nozzle, .nozzle, .nozzle
     ]
     static let chainBVolumes: [Float] = [1.6, 1.5, 1.4, 1.3, 1.2, 1.1, 1.0, 0.9, 0.8, 0.8]
 
-    let collectorPath: [SIMD3<Float>]
-    private let collectorLengths: [Float]
-    private let collectorTotal: Float
+    let exhaustPath: [SIMD3<Float>]
+    private let exhaustLengths: [Float]
+    private let exhaustTotal: Float
 
     init(config: TurbineConfig = TurbineConfig()) {
         cfg = config
@@ -128,13 +128,14 @@ final class TurbineCA {
             PressureStation(id: $0.offset, name: $0.element,
                             kPa: config.ambientPressure, tempK: config.ambientTemp)
         }
-        let yTop = (Float(config.diskCount - 1) / 2) * config.pitch + 0.07
-        let path: [SIMD3<Float>] = [SIMD3(0, yTop, 0), SIMD3(0, 0.80, 0), SIMD3(0, 0.80, -0.35), SIMD3(0, 0.80, -1.95)]
+
+        // Longitudinal alignment along Z axis: Z ranges from +1.6 (Front Intake) through Z=0 (Turbine center) to -1.8 (Rear Exhaust)
+        let path: [SIMD3<Float>] = [SIMD3(0, 0, 0), SIMD3(0, 0, -0.4), SIMD3(0, 0, -1.0), SIMD3(0, 0, -1.8)]
         var lens: [Float] = []
         for k in 0..<(path.count - 1) { lens.append(simd_length(path[k + 1] - path[k])) }
-        collectorPath = path
-        collectorLengths = lens
-        collectorTotal = lens.reduce(0, +)
+        exhaustPath = path
+        exhaustLengths = lens
+        exhaustTotal = lens.reduce(0, +)
     }
 
     func reset() {
@@ -179,28 +180,20 @@ final class TurbineCA {
     }
 
     func ringRadius(_ r: Int) -> Float { cfg.innerRingRadius + (Float(r) + 0.5) * cfg.ringWidth }
-    func diskY(_ i: Int) -> Float { (Float(i) - Float(cfg.diskCount - 1) / 2) * cfg.pitch }
-    func gapY(_ g: Int) -> Float { (Float(g) + 0.5 - Float(cfg.diskCount - 1) / 2) * cfg.pitch }
-    var jetX: Float { ringRadius(cfg.ringCount - 1) }
+    func diskZ(_ i: Int) -> Float { (Float(i) - Float(cfg.diskCount - 1) / 2) * cfg.pitch }
+    func gapZ(_ g: Int) -> Float { (Float(g) + 0.5 - Float(cfg.diskCount - 1) / 2) * cfg.pitch }
+    var turbineZCenter: Float { 0 }
     var stackHalfSpan: Float { Float(cfg.gapCount) * cfg.pitch / 2 }
 
     private func lerp(_ a: Float, _ b: Float, _ t: Float) -> Float { a + (b - a) * max(0, min(1, t)) }
 
-    func jetRadius(_ c: Float) -> Float {
-        if c < 2 { return 0.17 }
-        if c < 6 { return lerp(0.17, 0.13, (c - 2) / 4) }
-        return 0.15
-    }
-    func ductHalfX(_ c: Float) -> Float {
-        let base = jetRadius(min(c, 12)) * 0.9
-        return c <= 12 ? base : lerp(base, 0.025, (c - 12) / 4)
-    }
-    func ductHalfY(_ c: Float) -> Float {
-        let base = jetRadius(min(c, 12)) * 0.9
-        return c <= 12 ? base : lerp(base, stackHalfSpan, (c - 12) / 4)
+    func ductRadius(_ c: Float) -> Float {
+        if c < 2 { return 0.28 }
+        if c < 6 { return lerp(0.28, 0.22, (c - 2) / 4) }
+        return 0.25
     }
     func rearRadius(_ c: Float) -> Float {
-        c < 3 ? lerp(0.5, 0.22, c / 3) : lerp(0.2, 0.09, (c - 3) / 7)
+        c < 3 ? lerp(0.35, 0.20, c / 3) : lerp(0.20, 0.08, (c - 3) / 7)
     }
 
     func isHole(ring r: Int, sector t: Int) -> Bool {
@@ -313,8 +306,8 @@ final class TurbineCA {
         p.stage = stage
         p.j = cell
         p.temp = cfg.ambientTemp
-        p.v = rng.unit() * 2 - 1
-        p.u = (rng.unit() * 2 - 1) * (1 - p.v * p.v).squareRoot()
+        p.u = rng.unit() * 2 - 1
+        p.v = (rng.unit() * 2 - 1) * (1 - p.u * p.u).squareRoot()
         p.jit = (rng.unit() - 0.5) * 0.7
         p.yOff = (rng.unit() - 0.5) * 0.55
         particles[id] = p
@@ -478,8 +471,8 @@ final class TurbineCA {
         if exiting {
             p.stage = .collector
             p.j = 0
-            p.v = rng.unit() * 2 - 1
-            p.u = (rng.unit() * 2 - 1) * (1 - p.v * p.v).squareRoot()
+            p.u = rng.unit() * 2 - 1
+            p.v = (rng.unit() * 2 - 1) * (1 - p.u * p.u).squareRoot()
             p.jit = (rng.unit() - 0.5) * 0.7
             p.r = rNew; p.t = tNew
             chainB.occ[0] += 1
@@ -497,7 +490,7 @@ final class TurbineCA {
         p.prev = targetPosition(of: p)
         p.age += 1
         p.temp = max(cfg.ambientTemp, p.temp * 0.93)
-        if p.age > 12 {
+        if p.age > 16 {
             particles[i] = GasParticle()
             freeIDs.append(i)
         } else {
@@ -571,32 +564,33 @@ final class TurbineCA {
         case .free:
             return .zero
         case .intake:
+            // Flow moves along +Z (Intake at +1.5, Compressor/Combustor leading to Turbine at Z = 0)
             let c = Float(p.j) + 0.5 + p.jit
-            let d = (Float(cfg.chainACells) - c) * cfg.jetCellLength
-            return SIMD3(jetX + p.u * ductHalfX(c), p.v * ductHalfY(c), d)
+            let totalLen = Float(cfg.chainACells) * cfg.jetCellLength
+            let zPos = 1.6 - (c / Float(cfg.chainACells)) * 1.6
+            let rad = ductRadius(c)
+            return SIMD3(p.u * rad, p.v * rad, zPos)
         case .turbine:
             let theta = (Float(p.t) + 0.5) * cfg.sectorAngle
             let r = ringRadius(p.r)
-            return SIMD3(r * cos(theta), gapY(p.g) + p.yOff * cfg.pitch, -r * sin(theta))
+            return SIMD3(r * cos(theta), r * sin(theta), diskZ(p.r))
         case .collector:
             let c = Float(p.j) + 0.5 + p.jit
-            let s = max(0, min(1, c / Float(cfg.chainBCells))) * collectorTotal
+            let s = max(0, min(1, c / Float(cfg.chainBCells))) * exhaustTotal
             var seg = 0, acc: Float = 0
-            while seg < collectorLengths.count - 1, acc + collectorLengths[seg] < s {
-                acc += collectorLengths[seg]; seg += 1
+            while seg < exhaustLengths.count - 1, acc + exhaustLengths[seg] < s {
+                acc += exhaustLengths[seg]; seg += 1
             }
-            let dir = simd_normalize(collectorPath[seg + 1] - collectorPath[seg])
-            let center = collectorPath[seg] + dir * (s - acc)
+            let dir = simd_normalize(exhaustPath[seg + 1] - exhaustPath[seg])
+            let center = exhaustPath[seg] + dir * (s - acc)
             let rad = rearRadius(c)
-            let a1 = SIMD3<Float>(1, 0, 0)
-            let a2 = abs(dir.y) > 0.5 ? SIMD3<Float>(0, 0, 1) : SIMD3<Float>(0, 1, 0)
-            return center + a1 * (p.u * rad) + a2 * (p.v * rad)
+            return SIMD3(p.u * rad, p.v * rad, center.z)
         case .plume:
-            let end = collectorPath[collectorPath.count - 1]
             let a = Float(p.age)
-            let spread = 0.09 * (1 + 0.12 * a)
-            let speed = (p.temp / cfg.ambientTemp).squareRoot() * 0.16
-            return SIMD3(p.u * spread, end.y + p.v * spread, end.z - a * speed)
+            let zStart = -1.8
+            let zPos = zStart - Double(a) * 0.18
+            let spread = 0.12 * (1.0 + 0.15 * a)
+            return SIMD3(p.u * spread, p.v * spread, Float(zPos))
         }
     }
 
@@ -608,7 +602,7 @@ final class TurbineCA {
     func visualScale(of p: GasParticle) -> Float {
         let heat = max(0, min(1, (p.temp - cfg.ambientTemp) / 1500))
         var s = 0.7 + 0.9 * heat
-        if p.stage == .plume { s *= 1 + 0.07 * Float(p.age) }
+        if p.stage == .plume { s *= 1 + 0.08 * Float(p.age) }
         return s
     }
 }
