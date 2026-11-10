@@ -77,11 +77,46 @@ struct PressureOverlay: View {
     }
 }
 
+// MARK: - Stage populations (where the CA's gas is right now)
+
+struct StageBar: View {
+    let counts: [Int]
+
+    var body: some View {
+        let total = max(1, counts.reduce(0, +))
+        VStack(alignment: .leading, spacing: 4) {
+            Text("GAS BY STAGE")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+            ForEach(EngineStage.allCases) { stage in
+                let n = stage.rawValue < counts.count ? counts[stage.rawValue] : 0
+                HStack(spacing: 6) {
+                    Text(stage.title)
+                        .frame(width: 128, alignment: .leading)
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(.white.opacity(0.12))
+                            Capsule().fill(Color(stage.color))
+                                .frame(width: max(2, geo.size.width * CGFloat(n) / CGFloat(total)))
+                        }
+                    }
+                    .frame(width: 70, height: 6)
+                    Text("\(n)").frame(width: 34, alignment: .trailing)
+                }
+                .font(.system(size: 10, design: .monospaced))
+            }
+        }
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 // MARK: - Main view
 
 struct BladelessTurbineView: View {
     @StateObject private var controller = TurbineSceneController()
     @State private var fuel: Double = 0.6
+    @State private var pressureRatio: Double = Double(TurbineConfig().defaultPressureRatio)
 
     var body: some View {
         ZStack {
@@ -90,16 +125,23 @@ struct BladelessTurbineView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top, spacing: 8) {
-                    PressureOverlay(stations: controller.stations,
-                                    ambient: controller.cfg.ambientPressure)
+                    VStack(alignment: .leading, spacing: 8) {
+                        PressureOverlay(stations: controller.stations,
+                                        ambient: controller.cfg.ambientPressure)
+                        StageBar(counts: controller.stageCounts)
+                    }
 
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Tesla-Turbine Jet").font(.headline)
                         Text(String(format: "Shaft     %5.0f rpm  (%.0f%%)", controller.rpm, controller.shaftPercent))
                         Text(String(format: "Flame     %5.0f K", controller.flameTemp))
+                        Text(String(format: "Press.ratio %4.2f : 1", controller.pressureRatio))
                         Text(String(format: "Fuel      %5.1f g/s", controller.fuelFlow))
                         Text(String(format: "Fuel used %5.1f g", controller.fuelUsed))
-                        Text(String(format: "Thrust    %5.1f", controller.thrust))
+                        Text(String(format: "Exit vel. %5.0f m/s", controller.exhaustVelocity))
+                        Text(String(format: "Mass flow %5.2f kg/s", controller.massFlow))
+                        Text(String(format: "Thrust    %5.0f N", controller.thrust))
+                        Text(String(format: "TSFC      %5.0f g/kN·s", controller.tsfc))
                         Text(String(format: "Turbine τ  %4.2f", controller.turbineTorque))
                         Text(String(format: "Compr. τ   %4.2f", controller.compressorLoad))
                         Text("Gas parts  \(controller.activeCount)")
@@ -122,6 +164,10 @@ struct BladelessTurbineView: View {
                     Text("Fuel")
                     Slider(value: $fuel, in: 0...1)
                         .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
+                    Text(String(format: "PR %.1f", pressureRatio))
+                        .font(.system(size: 12, design: .monospaced))
+                    Slider(value: $pressureRatio, in: 2...8)
+                        .onChange(of: pressureRatio) { _, v in controller.setPressureRatio(Float(v)) }
                     Button("Reset") { controller.reset() }
                         .buttonStyle(.bordered)
                 }
@@ -131,7 +177,10 @@ struct BladelessTurbineView: View {
             .padding()
             .foregroundStyle(.white)
         }
-        .onAppear { controller.setFuel(Float(fuel)) }
+        .onAppear {
+            controller.setFuel(Float(fuel))
+            controller.setPressureRatio(Float(pressureRatio))
+        }
     }
 }
 

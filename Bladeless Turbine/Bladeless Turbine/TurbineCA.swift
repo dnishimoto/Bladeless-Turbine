@@ -113,14 +113,21 @@ final class TurbineCA {
     private(set) var starterOn = false
     private(set) var exhaustedTotal = 0
     private(set) var fuelUsedGrams: Float = 0
-    private(set) var thrust: Float = 0
+    private(set) var thrust: Float = 0             // N, from the CA's exhaust mass flow × nozzle exit velocity
+    private(set) var exhaustVelocity: Float = 0    // m/s, isentropic expansion from the collector pressure
+    private(set) var exhaustMassFlow: Float = 0    // kg/s
     private(set) var turbineTorque: Float = 0
     private(set) var compressorLoad: Float = 0
     private(set) var stations: [PressureStation]
-    private var thrustAccum: Float = 0
+    private(set) var stageCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
+    private var exhaustThisTick = 0
+    private var exhaustRate: Float = 0             // particles per second (smoothed)
+    private var stageHeat: Float = 0               // per-stage compression temperature gain
 
     /// 0...1 fuel flow command
     var fuel: Float = 0.6
+    /// Design overall pressure ratio of the bladed compressor (head per stage follows from it).
+    var designPressureRatio: Float = TurbineConfig().defaultPressureRatio
 
     static let stationNames = ["Air inlet", "Compressor exit", "Combustor", "Manifold",
                                "Turbine rim", "Mid disc", "Hub ports", "Collector", "Rear nozzle"]
@@ -192,7 +199,11 @@ final class TurbineCA {
         exhaustedTotal = 0
         fuelUsedGrams = 0
         thrust = 0
-        thrustAccum = 0
+        exhaustVelocity = 0
+        exhaustMassFlow = 0
+        exhaustThisTick = 0
+        exhaustRate = 0
+        stageCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
         for k in 0..<stations.count {
             stations[k].kPa = cfg.ambientPressure
             stations[k].tempK = cfg.ambientTemp
@@ -207,6 +218,10 @@ final class TurbineCA {
     var shaftFraction: Float { omega / cfg.designOmega }
     var rpm: Float { shaftFraction * cfg.displayDesignRPM }
     var flameTemp: Float { stations[2].tempK }
+    /// Overall pressure ratio the compressor is actually delivering (combustor / ambient).
+    var overallPressureRatio: Float { stations[2].kPa / cfg.ambientPressure }
+    /// Thrust-specific fuel consumption, g of fuel per second per kN of thrust.
+    var tsfc: Float { thrust > 1 ? fuelFlowGramsPerSec / (thrust / 1000) : 0 }
     var fuelFlowGramsPerSec: Float { fuel * cfg.maxFuelFlowGramsPerSec }
 
     // MARK: Geometry helpers
@@ -273,10 +288,16 @@ final class TurbineCA {
         refillInlet()
         burnFuel(dt)
 
-        let head = cfg.compressorHeadPerStage * pow(omega / cfg.designOmega, 2)
+        // Compressor: each stage can lift pressure by (PR − 1)/stages × ambient at design speed
+        // (head ∝ speed²) and heats the gas by its share of the isentropic temperature rise
+        // T2/T1 = PR^((γ−1)/γ), split evenly over the stages.
+        let speedRatio = omega / cfg.designOmega
+        let head = (designPressureRatio - 1) / Float(cfg.compressorStages) * speedRatio * speedRatio
+        let isentropicExponent = (cfg.gamma - 1) / cfg.gamma
+        stageHeat = (pow(max(1, designPressureRatio), isentropicExponent / Float(cfg.compressorStages)) - 1) * speedRatio
         var torque: Float = 0
         var load: Float = 0
-        thrustAccum = 0
+        exhaustThisTick = 0
 
         let n = particles.count
         let start = Int(rng.next() % UInt64(n))      // random sweep start avoids directional bias
@@ -301,8 +322,8 @@ final class TurbineCA {
         let alpha = turbineTorque - compressorLoad - cfg.shaftFriction * omega + starter
         omega = max(0, min(cfg.maxOmega, omega + alpha * dt))
 
-        thrust += 0.1 * (thrustAccum * cfg.thrustPerUnit * cfg.tickRate - thrust)
         updateStations()
+        updateNozzlePerformance()
     }
 
     // MARK: Pressure measurement (the CA's own state → pressure)
@@ -403,7 +424,7 @@ final class TurbineCA {
             if chainA.kind[j] == .combustor { ids.append(i) }
         }
         guard !ids.isEmpty else { return }
-        let q = cfg.fuelEnergyPerTick * fuel
+        let q = cfg.fuelEnergyPerTick * fuel * cfg.combustionEfficiency
         let per = q / Float(ids.count)
         var used: Float = 0
         for i in ids {
@@ -443,14 +464,14 @@ final class TurbineCA {
                     p.stage = .plume
                     p.age = 0
                     exhaustedTotal += 1
-                    thrustAccum += (p.temp / cfg.ambientTemp).squareRoot()
+                    exhaustThisTick += 1
                     done = true
                 }
                 break
             }
             if chain.occ[j + 1] < chain.capacity[j + 1] {
                 if chain.kind[j] == .compressor {
-                    p.temp *= 1 + cfg.compressionHeat * omega / cfg.designOmega
+                    p.temp *= 1 + stageHeat
                     work += 1 + max(0, -dp) * 3
                 }
                 j += 1
@@ -570,17 +591,30 @@ final class TurbineCA {
     private func updateStations() {
         var tsum = [Float](repeating: 0, count: 9)
         var cnt = [Float](repeating: 0, count: 9)
+        var stages = [Int](repeating: 0, count: EngineStage.allCases.count)
         for i in particles.indices {
             let p = particles[i]
             var z = -1
             switch p.stage {
-            case .intake: z = p.j < 2 ? 0 : p.j < 6 ? 1 : p.j < 12 ? 2 : 3
-            case .turbine: z = p.r >= 15 ? 4 : p.r >= 8 ? 5 : 6
-            case .collector: z = p.j < 3 ? 7 : 8
-            default: break
+            case .intake:
+                z = p.j < 2 ? 0 : p.j < 6 ? 1 : p.j < 12 ? 2 : 3
+                stages[p.j < 2 ? EngineStage.intake.rawValue
+                       : p.j < 6 ? EngineStage.compression.rawValue
+                       : EngineStage.combustion.rawValue] += 1
+            case .turbine:
+                z = p.r >= 15 ? 4 : p.r >= 8 ? 5 : 6
+                stages[EngineStage.turbine.rawValue] += 1
+            case .collector:
+                z = p.j < 3 ? 7 : 8
+                stages[EngineStage.exhaust.rawValue] += 1
+            case .plume:
+                stages[EngineStage.exhaust.rawValue] += 1
+            case .free:
+                break
             }
             if z >= 0 { tsum[z] += p.temp; cnt[z] += 1 }
         }
+        stageCounts = stages
         func mean(_ a: [Float], _ r: Range<Int>) -> Float {
             r.reduce(0) { $0 + a[$1] } / Float(r.count)
         }
@@ -603,6 +637,24 @@ final class TurbineCA {
             stations[k].kPa += 0.06 * (target - stations[k].kPa)
             if cnt[k] > 0 { stations[k].tempK += 0.15 * (tsum[k] / cnt[k] - stations[k].tempK) }
         }
+    }
+
+    // MARK: Nozzle performance (thermodynamics applied to the CA's own state)
+
+    /// Exit velocity from isentropic expansion of the collector gas to ambient,
+    ///   v = √( 2·cp·T · (1 − (Pamb/P)^((γ−1)/γ)) ),
+    /// and thrust = exhaust mass flow × v, with the mass flow counted from the particles
+    /// that actually leave the rear nozzle.
+    private func updateNozzlePerformance() {
+        let collector = stations[7]
+        let ratio = max(1.0001, collector.kPa / cfg.ambientPressure)
+        let expansion = 1 - pow(1 / ratio, (cfg.gamma - 1) / cfg.gamma)
+        let v = (2 * cfg.specificHeatCp * collector.tempK * max(0, expansion)).squareRoot()
+        exhaustVelocity += 0.1 * (v - exhaustVelocity)
+
+        exhaustRate += 0.05 * (Float(exhaustThisTick) * cfg.tickRate - exhaustRate)
+        exhaustMassFlow = exhaustRate * cfg.kgPerParticle
+        thrust = exhaustMassFlow * exhaustVelocity
     }
 
     // MARK: Positions (world space)

@@ -31,6 +31,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var fuelFlow: Float = 0
     @Published var fuelUsed: Float = 0
     @Published var thrust: Float = 0
+    @Published var exhaustVelocity: Float = 0
+    @Published var massFlow: Float = 0
+    @Published var pressureRatio: Float = 1
+    @Published var tsfc: Float = 0
+    @Published var stageCounts: [Int] = Array(repeating: 0, count: EngineStage.allCases.count)
     @Published var turbineTorque: Float = 0
     @Published var compressorLoad: Float = 0
     @Published var starterOn = false
@@ -68,6 +73,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     // MARK: Controls
 
     func setFuel(_ v: Float) { sim.fuel = v }
+    func setPressureRatio(_ v: Float) { sim.designPressureRatio = v }
     func startEngine() { sim.startEngine() }
 
     func reset() {
@@ -498,6 +504,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             let flame = sim.flameTemp, flow = sim.fuelFlowGramsPerSec, used = sim.fuelUsedGrams
             let thrust = sim.thrust, tq = sim.turbineTorque, ld = sim.compressorLoad
             let starter = sim.starterOn
+            let vExit = sim.exhaustVelocity, mdot = sim.exhaustMassFlow
+            let opr = sim.overallPressureRatio, sfc = sim.tsfc, counts = sim.stageCounts
             DispatchQueue.main.async {
                 self.stations = snapshot
                 self.rpm = rpm
@@ -508,6 +516,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 self.fuelFlow = flow
                 self.fuelUsed = used
                 self.thrust = thrust
+                self.exhaustVelocity = vExit
+                self.massFlow = mdot
+                self.pressureRatio = opr
+                self.tsfc = sfc
+                self.stageCounts = counts
                 self.turbineTorque = tq
                 self.compressorLoad = ld
                 self.starterOn = starter

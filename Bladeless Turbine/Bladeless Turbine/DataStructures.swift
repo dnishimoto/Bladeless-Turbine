@@ -4,43 +4,18 @@
 //
 //  Created by David Nishimoto on 11/9/26.
 //
+//  DataStructures.swift
+//  Bladeless Turbine
+//
+//  Shared value types for the cellular-automaton jet engine: configuration,
+//  gas particles, engine stage labels and a fast RNG.
+//
 
 import Foundation
 import SwiftUI
 import SceneKit
 
-struct EngineConfiguration {
-    var diskCount = 9
-    var diskRadius: Float = 1.0
-    var hubRadius: Float = 0.12
-    var diskSpacing: Float = 0.09
-    var diskThickness: Float = 0.012
-    var holeCount = 3
-    var holeInnerRadius: Float = 0.24
-    var holeOuterRadius: Float = 0.52
-    var holeHalfAngle: Float = 24.0 * .pi / 180.0
-
-    var gamma: Float = 1.4
-    var ambientTemp: Float = 288.15
-    var ambientPressure: Float = 101.3
-    var compressorRatio: Float = 4.0
-    var fuelFlowRate: Float = 0.05
-    var combustionEfficiency: Float = 0.98
-
-    var viscousCoupling: Float = 0.22
-    var radialFlowRate: Float = 0.14
-    var torqueGain: Float = 0.00045
-    var diskFriction: Float = 0.28
-
-    var gapCount: Int { diskCount - 1 }
-    var sectorCount = 48
-    var sectorAngle: Float { 2.0 * .pi / Float(sectorCount) }
-
-    var maxParticles = 1200
-    var tickRate: Float = 30.0
-}
-
-// MARK: - Gas Stages
+// MARK: - Engine stages (labels, colours and ordering for the HUD)
 
 enum EngineStage: Int, CaseIterable, Identifiable {
     case intake, compression, combustion, turbine, exhaust
@@ -67,26 +42,6 @@ enum EngineStage: Int, CaseIterable, Identifiable {
         }
     }
 }
-
-// MARK: - Jet Engine Particle Model (Renamed to avoid conflict with TurbineCA)
-
-struct JetGasParticle {
-    var active = false
-    var stage: EngineStage = .intake
-
-    var radius: Float = 0.9
-    var angle: Float = 0
-    var axialPosition: Float = 3.5
-
-    var temperature: Float = 288.15
-    var pressure: Float = 101.3
-    var velocity: Float = 50.0
-    var angularVelocity: Float = 0
-
-    var node: SCNNode?
-    var age: Float = 0
-}
-
 
 // MARK: - Configuration
 
@@ -118,16 +73,22 @@ struct TurbineConfig {
     var maxParticles = 2400
     var airRefillPerTick = 60
 
+    // Thermodynamics (ideal air)
+    var gamma: Float = 1.4
+    var gasConstant: Float = 287.05          // J/(kg·K)
+    var kgPerParticle: Float = 0.01          // mass each CA particle stands for
+
     // Compressor
+    var compressorStages = 4
+    var defaultPressureRatio: Float = 4      // design overall pressure ratio
     var designOmega: Float = 3.5
     var maxOmega: Float = 5
-    var compressorHeadPerStage: Float = 0.7  // × ambient pressure at design speed
-    var compressionHeat: Float = 0.03
     var compressorLoadGain: Float = 0.05
 
     // Combustor
     var fuelEnergyPerTick: Float = 11000     // K·particles per tick at fuel = 1
     var fuelGasPerTick: Float = 5            // fuel mass becoming gas per tick at fuel = 1
+    var combustionEfficiency: Float = 0.98
     var maxFlameTemp: Float = 2000
     var maxFuelFlowGramsPerSec: Float = 60
 
@@ -137,7 +98,6 @@ struct TurbineConfig {
     var starterTorque: Float = 2.5
     var starterCutoff: Float = 0.55          // fraction of design speed
     var displayDesignRPM: Float = 24000      // what 100 % design speed is labelled as
-    var thrustPerUnit: Float = 0.02
 
     // Duct geometry (shared with the scene builder)
     var chainACells = 16
@@ -147,8 +107,8 @@ struct TurbineConfig {
     var gapCount: Int { diskCount - 1 }
     var sectorAngle: Float { 2 * .pi / Float(sectorCount) }
     var ringWidth: Float { (diskRadius - innerRingRadius) / Float(ringCount) }
+    var specificHeatCp: Float { gamma * gasConstant / (gamma - 1) }
 }
-// MARK: - Particle
 
 // MARK: - Particle
 
@@ -165,6 +125,8 @@ struct GasParticle {
     var prev = SIMD3<Float>(0, 0, 0)
 }
 
+// MARK: - RNG
+
 struct FastRNG {
     var state: UInt64 = 0x9E3779B97F4A7C15
     mutating func next() -> UInt64 {
@@ -176,4 +138,3 @@ struct FastRNG {
     /// Uniform in [0, 1)
     mutating func unit() -> Float { Float(next() >> 40) / Float(1 << 24) }
 }
-
