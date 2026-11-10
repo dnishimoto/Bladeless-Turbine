@@ -47,15 +47,13 @@ struct TurbineConfig {
     var holeHalfAngle: Float = 24 * Float.pi / 180
 
     // MARK: Gas Particle Rendering
-
-    var cellCapacity: UInt8 = 3
-    var maxParticles: Int = 1400
-    var maxInjectPerTick: Float = 5
-    var nozzleSectors: Int = 2
-    var tickRate: Float = 20
-    var exhaustLife: Int = 16
-    var exhaustRise: Float = 0.05
-
+    var cellCapacity: UInt8 = 6              // Increased cell packing capacity for denser flow
+        var maxParticles: Int = 4000             // Increased from 1400 to 4000 gas particles
+        var maxInjectPerTick: Float = 15.0       // Increased injection rate per tick
+        var nozzleSectors: Int = 2
+        var tickRate: Float = 20
+        var exhaustLife: Int = 24
+    
     // MARK: Air Properties
 
     var gasConstant: Float = 287.05
