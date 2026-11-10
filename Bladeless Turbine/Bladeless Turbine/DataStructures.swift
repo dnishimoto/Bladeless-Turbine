@@ -2,115 +2,224 @@
 //  DataStructures.swift
 //  Bladeless Turbine
 //
+//  Shared simulation data structures
+//
 
 import Foundation
 import SwiftUI
 import SceneKit
 
-enum EngineStage: Int, CaseIterable, Identifiable {
-    case intake, compression, combustion, turbine, exhaust
-
-    var id: Int { rawValue }
-
-    var title: String {
-        switch self {
-        case .intake: return "1. INTAKE"
-        case .compression: return "2. COMPRESSOR"
-        case .combustion: return "3. COMBUSTOR"
-        case .turbine: return "4. TESLA TURBINE"
-        case .exhaust: return "5. EXHAUST NOZZLE"
-        }
-    }
-
-    var color: UIColor {
-        switch self {
-        case .intake: return .cyan
-        case .compression: return .blue
-        case .combustion: return .orange
-        case .turbine: return .yellow
-        case .exhaust: return .red
-        }
-    }
-}
 
 struct TurbineConfig {
-    var diskCount = 9
+
+    // MARK: Rotor Geometry
+
+    var diskCount: Int = 9
     var diskRadius: Float = 1.0
     var hubRadius: Float = 0.12
     var pitch: Float = 0.09
     var diskThickness: Float = 0.012
 
-    var ringCount = 20
-    var sectorCount = 48
+    // MARK: Cellular Automaton Mesh
+
+    var ringCount: Int = 20
+    var sectorCount: Int = 48
     var innerRingRadius: Float = 0.24
-    var holeCount = 3
+
+    // MARK: Exhaust Openings
+
+    var holeCount: Int = 3
     var holeInnerRadius: Float = 0.24
     var holeOuterRadius: Float = 0.52
-    var holeHalfAngle: Float = 24 * .pi / 180
-    var cellCapacity = 3
-    var nozzleSectors = 3
-    var turbineAmbientPerCell: Float = 0.15
+    var holeHalfAngle: Float = 24 * Float.pi / 180
 
-    var ambientParticles: Float = 6
-    var ambientPressure: Float = 101.325
-    var ambientTemp: Float = 300
+    // MARK: Gas Particle Rendering
+
+    var cellCapacity: UInt8 = 3
+    var maxParticles: Int = 1400
+    var maxInjectPerTick: Float = 5
+    var nozzleSectors: Int = 2
     var tickRate: Float = 20
-    var maxParticles = 2400
-    var airRefillPerTick = 60
+    var exhaustLife: Int = 16
+    var exhaustRise: Float = 0.05
 
-    var gamma: Float = 1.4
+    // MARK: Air Properties
+
     var gasConstant: Float = 287.05
-    var kgPerParticle: Float = 0.01
+    var gamma: Float = 1.4
 
-    var compressorStages = 4
-    var defaultPressureRatio: Float = 4
-    var designOmega: Float = 3.5
-    var maxOmega: Float = 5
-    var compressorLoadGain: Float = 0.05
+    // MARK: Pressure & Engine Boundaries
 
-    var fuelEnergyPerTick: Float = 11000
-    var fuelGasPerTick: Float = 5
-    var combustionEfficiency: Float = 0.98
-    var maxFlameTemp: Float = 2000
-    var maxFuelFlowGramsPerSec: Float = 60
+    var inletPressure: Float = 102_525
+    var outletPressure: Float = 101_325
+    var ambientPressure: Float = 101.325 // kPa equivalent or reference
+    var axialPressureDrop: Float = 120
 
-    var turbineTorqueGain: Float = 0.010
-    var shaftFriction: Float = 0.35
-    var starterTorque: Float = 2.5
-    var starterCutoff: Float = 0.55
-    var displayDesignRPM: Float = 24000
+    // MARK: Temperature Boundaries
 
-    var chainACells = 16
-    var chainBCells = 10
-    var jetCellLength: Float = 0.12
+    var inletTemperature: Float = 950
+    var ambientTemperature: Float = 288.15
 
-    var gapCount: Int { diskCount - 1 }
-    var sectorAngle: Float { 2 * .pi / Float(sectorCount) }
-    var ringWidth: Float { (diskRadius - innerRingRadius) / Float(ringCount) }
-    var specificHeatCp: Float { gamma * gasConstant / (gamma - 1) }
+    // MARK: Fuel & Combustion
+
+    var fuelGasPerTick: Float = 5.0
+  
+    // MARK: Flow Physics
+
+    var effectiveFlowGap: Float = 0.0008
+    var thermalDiffusivity: Float = 2.2e-5
+    var maxRadialSpeed: Float = 35
+    var maxTangentialSpeed: Float = 35
+    var inletTangentialSpeed: Float = 5
+
+    // MARK: Rotor Mechanics
+
+    var rotorInertia: Float = 0.08
+    var rotorDrag: Float = 0.08
+    var diskFriction: Float = 0.08
+ 
+    // MARK: Visual Flow Rate
+
+    var referenceMassFlow: Float = 0.02
+
+    // MARK: Derived Mesh Values
+
+    var gapCount: Int {
+        max(1, diskCount - 1)
+    }
+
+    var sectorAngle: Float {
+        2 * Float.pi / Float(max(1, sectorCount))
+    }
+
+    var ringWidth: Float {
+        (diskRadius - innerRingRadius) /
+        Float(max(1, ringCount))
+    }
+
+ 
 }
 
+// MARK: - Gas Particle
+
 struct GasParticle {
+
+    // Particle state
+    var active: Bool = false
     var stage: GasStage = .free
-    var j = 0
-    var g = 0, r = 0, t = 0
-    var temp: Float = 300
-    var u: Float = 0, v: Float = 0
-    var jit: Float = 0
-    var yOff: Float = 0
-    var age = 0
-    var mom = false
-    var prev = SIMD3<Float>(0, 0, 0)
+
+    // Current CA cell
+    var g: Int = 0
+    var r: Int = 0
+    var t: Int = 0
+
+    // Previous CA cell for interpolation
+    var pg: Int = 0
+    var pr: Int = 0
+    var pt: Int = 0
+
+    // Thermodynamic state
+    var temp: Float = 288.15
+
+    // Visual vertical offset
+    var yOffset: Float = 0
+
+    // Exhaust tracking
+    var exhaustAge: Int = -1
+
+    // Sub-cell movement remainders
+    var radialRemainder: Float = 0
+    var angularRemainder: Float = 0
+    var axialRemainder: Float = 0
+}
+
+
+enum GasStage: Int, CaseIterable, Codable {
+    case free
+    case intake
+    case turbine
+    case collector
+    case plume
 }
 
 struct FastRNG {
+
     var state: UInt64 = 0x9E3779B97F4A7C15
+
     mutating func next() -> UInt64 {
         state ^= state << 13
         state ^= state >> 7
         state ^= state << 17
         return state
     }
-    mutating func unit() -> Float { Float(next() >> 40) / Float(1 << 24) }
+
+    mutating func unit() -> Float {
+        Float(next() >> 40) / Float(1 << 24)
+    }
 }
+
+struct FlowCell {
+    var density: Float = 1.2
+    var pressure: Float = 101_325
+    var temperature: Float = 288.15
+
+    var radialVelocity: Float = 0
+    var tangentialVelocity: Float = 0
+    var axialVelocity: Float = 0
+
+    var totalSpecificEnergy: Float = 0
+}
+
+// MARK: - Pressure Measurement Station
+
+struct PressureStation: Identifiable {
+
+    let id: Int
+    let name: String
+
+    var kPa: Float
+    var tempK: Float
+}
+
+// MARK: - Engine Stages
+
+enum EngineStage: Int, CaseIterable, Identifiable {
+
+    case intake
+    case compressor
+    case combustor
+    case turbine
+    case collector
+    case exhaust
+
+    var id: Int {
+        rawValue
+    }
+
+    var title: String {
+        switch self {
+        case .intake: return "Intake"
+        case .compressor: return "Compressor"
+        case .combustor: return "Combustor"
+        case .turbine: return "Turbine"
+        case .collector: return "Collector"
+        case .exhaust: return "Exhaust"
+        }
+    }
+
+    var color: UIColor {
+        switch self {
+        case .intake: return .systemBlue
+        case .compressor: return .systemCyan
+        case .combustor: return .systemYellow
+        case .turbine: return .systemOrange
+        case .collector: return .systemRed
+        case .exhaust: return .systemPink
+        }
+    }
+}
+
+
+
+
 

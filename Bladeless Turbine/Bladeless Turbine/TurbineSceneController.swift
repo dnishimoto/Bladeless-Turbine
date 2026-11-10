@@ -119,7 +119,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         combustorMaterial.isDoubleSided = true
         combustorMaterial.transparency = 0.35
 
-        // 1. Intake Cowling & Bullet Nose
         let intakeCyl = SCNCylinder(radius: 0.32, height: 0.4)
         intakeCyl.firstMaterial = casingMat
         let intakeNode = SCNNode(geometry: intakeCyl)
@@ -134,7 +133,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         noseNode.position = SCNVector3(0, 0, 1.5)
         engineRoot.addChildNode(noseNode)
 
-        // Front Fan
         let fanHolder = SCNNode()
         fanHolder.position = SCNVector3(0, 0, 1.25)
         engineRoot.addChildNode(fanHolder)
@@ -146,7 +144,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             fanSpinNode.addChildNode(blade)
         }
 
-        // 2. Compressor Section
         let compCyl = SCNCylinder(radius: 0.28, height: 0.8)
         compCyl.firstMaterial = casingMat
         let compNode = SCNNode(geometry: compCyl)
@@ -169,7 +166,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             }
         }
 
-        // 3. Combustor Section
         let combustorCyl = SCNCylinder(radius: 0.35, height: 0.5)
         combustorCyl.firstMaterial = combustorMaterial
         let combNode = SCNNode(geometry: combustorCyl)
@@ -190,7 +186,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             engineRoot.addChildNode(node)
         }
 
-        // 4. Tesla Bladeless Turbine Rotor Section (Fixed to use diskZ)
         engineRoot.addChildNode(turbineSpinNode)
         turbineSpinNode.position = SCNVector3(0, 0, -0.5)
 
@@ -202,12 +197,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
         for i in 0..<cfg.diskCount {
             let node = SCNNode(geometry: i == 0 ? solidDisk : drilledDisk)
-            node.position.z = sim.diskZ(i) // Fixed from diskY to diskZ
+            node.position.z = sim.diskZ(i)
             node.renderingOrder = 5
             turbineSpinNode.addChildNode(node)
         }
 
-        // Central Shaft
         let shaftCyl = SCNCylinder(radius: CGFloat(cfg.hubRadius), height: 2.4)
         shaftCyl.firstMaterial = metal(alpha: 1, white: 0.4)
         let shaftNode = SCNNode(geometry: shaftCyl)
@@ -215,7 +209,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         shaftNode.position = SCNVector3(0, 0, 0.2)
         engineRoot.addChildNode(shaftNode)
 
-        // 5. Exhaust Section & Rear Nozzle
         let exhaustShroud = SCNCone(topRadius: 0.32, bottomRadius: 0.18, height: 0.9)
         exhaustShroud.firstMaterial = metal(alpha: 0.4, white: 0.6)
         let exhaustNode = SCNNode(geometry: exhaustShroud)
@@ -372,4 +365,3 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 }
-
