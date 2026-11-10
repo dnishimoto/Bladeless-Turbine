@@ -72,6 +72,7 @@ struct PressureOverlay: View {
     }
 }
 
+
 struct BladelessTurbineView: View {
     @StateObject private var controller = TurbineSceneController()
     @State private var fuel: Double = 0.6
@@ -118,26 +119,7 @@ struct BladelessTurbineView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
                 }
 
-                /*
-                Spacer()
-
-                // Engine Stage Progress Bar
-                HStack(spacing: 6) {
-                    ForEach(Array(EngineStage.allCases.enumerated()), id: \.offset) { idx, stage in
-                        HStack(spacing: 3) {
-                            Circle()
-                                .fill(Color(uiColor: stage.color))
-                                .frame(width: 6, height: 6)
-                            Text("\(stage.title): \(controller.stageCounts.indices.contains(idx) ? controller.stageCounts[idx] : 0)")
-                                .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        }
-                    }
-                }
-                .padding(6)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                 */
-
-                // Compact Cockpit Control Deck (Throttle & PR)
+                // Compact Cockpit Control Deck (Throttle)
                 HStack(spacing: 10) {
                     Button("START") { controller.startEngine() }
                         .font(.system(size: 10, weight: .bold))
@@ -146,19 +128,11 @@ struct BladelessTurbineView: View {
 
                     F16ThrottleView(throttle: $fuel)
                         .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
-/*
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("DESIGN PR: \(String(format: "%.1f", pressureRatio))×")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        Slider(value: $pressureRatio, in: 1.5...8.0, step: 0.5)
-                            .onChange(of: pressureRatio) { _, v in controller.setPressureRatio(Float(v)) }
-                    }
-                    .frame(width: 130)
 
                     Button("RESET") { controller.reset() }
                         .font(.system(size: 10, weight: .bold))
                         .buttonStyle(.bordered)
- */
+                        .tint(.red)
                 }
                 .padding(8)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
@@ -182,5 +156,6 @@ struct BladelessTurbineView: View {
         }
     }
 }
+
 
 #Preview { BladelessTurbineView() }

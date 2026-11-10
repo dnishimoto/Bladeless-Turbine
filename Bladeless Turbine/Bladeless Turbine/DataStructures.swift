@@ -16,6 +16,7 @@ struct TurbineConfig {
     var outletPressure: Float = 101_325
     var ambientPressure: Float = 101.325
     var axialPressureDrop: Float = 350.0       // High-speed pressure drop across core stages
+    var defaultPressureRatio: Float = 4.0      // Default overall compressor pressure ratio
     
     // High-speed flow parameters matching fighter intake velocity profiles
     var maxRadialSpeed: Float = 220.0          // High axial/radial ingestion speed (~Mach 0.6–0.8 face velocity)
@@ -48,24 +49,27 @@ struct TurbineConfig {
 
     // MARK: Gas Particle Rendering
     var cellCapacity: UInt8 = 6              // Increased cell packing capacity for denser flow
-        var maxParticles: Int = 4000             // Increased from 1400 to 4000 gas particles
-        var maxInjectPerTick: Float = 15.0       // Increased injection rate per tick
-        var nozzleSectors: Int = 2
-        var tickRate: Float = 20
-        var exhaustLife: Int = 24
+    var maxParticles: Int = 4000             // Increased gas particles
+    var maxInjectPerTick: Float = 15.0       // Increased injection rate per tick
+    var nozzleSectors: Int = 2
+    var tickRate: Float = 20
+    var exhaustLife: Int = 24
     
     // MARK: Air Properties
 
     var gasConstant: Float = 287.05
     var gamma: Float = 1.4
 
-   
     var inletTemperature: Float = 950
     var ambientTemperature: Float = 288.15
 
     // MARK: Fuel & Combustion
 
     var fuelGasPerTick: Float = 5.0
+    var maxFlameTemp: Float = 1800
+    var maxFuelFlowGramsPerSec: Float = 60
+    var fuelEnergyPerTick: Float = 11000
+    var combustionEfficiency: Float = 0.98
   
     // MARK: Flow Physics
 
@@ -77,7 +81,18 @@ struct TurbineConfig {
     var rotorInertia: Float = 0.08
     var rotorDrag: Float = 0.08
     var diskFriction: Float = 0.08
- 
+    var maxOmega: Float = 5.0
+    var designOmega: Float = 3.5
+    var starterTorque: Float = 2.5
+    var starterCutoff: Float = 0.55
+    var displayDesignRPM: Float = 24000
+    var turbineTorqueGain: Float = 0.015
+    var compressorLoadGain: Float = 0.05
+    var fuelEnergyPerTrustPerTick: Float? = nil
+    
+    var specificHeatCp: Float {
+        gamma * gasConstant / (gamma - 1)
+    }
  
     // MARK: Derived Mesh Values
 
@@ -93,15 +108,12 @@ struct TurbineConfig {
         (diskRadius - innerRingRadius) /
         Float(max(1, ringCount))
     }
-
- 
 }
 
 
 // MARK: - Gas Particle
 
 struct GasParticle {
-
     // Particle state
     var active: Bool = false
     var stage: GasStage = .free
@@ -135,13 +147,13 @@ struct GasParticle {
 enum GasStage: Int, CaseIterable, Codable {
     case free
     case intake
+    case compressor
     case turbine
     case collector
     case plume
 }
 
 struct FastRNG {
-
     var state: UInt64 = 0x9E3779B97F4A7C15
 
     mutating func next() -> UInt64 {
@@ -171,7 +183,6 @@ struct FlowCell {
 // MARK: - Pressure Measurement Station
 
 struct PressureStation: Identifiable {
-
     let id: Int
     let name: String
 
@@ -182,7 +193,6 @@ struct PressureStation: Identifiable {
 // MARK: - Engine Stages
 
 enum EngineStage: Int, CaseIterable, Identifiable {
-
     case intake
     case compressor
     case combustor
@@ -216,5 +226,4 @@ enum EngineStage: Int, CaseIterable, Identifiable {
         }
     }
 }
-
 

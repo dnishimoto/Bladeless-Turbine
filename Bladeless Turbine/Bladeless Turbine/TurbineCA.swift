@@ -3,7 +3,7 @@
 //  Bladeless Turbine
 //
 //  Equation-driven, reduced-order gas-flow model for a Tesla-style disc rotor
-//  integrated with longitudinal jet engine stations, thermodynamics, and shaft mechanics.
+//  integrated with longitudinal dual-spool jet engine stations, thermodynamics, and shaft mechanics.
 //
 
 import Foundation
@@ -20,8 +20,8 @@ final class TurbineCA {
     private var rng = FastRNG()
 
     private(set) var diskAngle: Float = 0
-    private(set) var omega: Float = 0
-    private(set) var starterOn = false
+    private(set) var omega: Float = 1.0  // Start with positive idle omega
+    private(set) var starterOn = true   // Start enabled to spin up immediately
     private(set) var exhaustedTotal = 0
     private(set) var fuelUsedGrams: Float = 0
     private(set) var thrust: Float = 0
@@ -29,64 +29,79 @@ final class TurbineCA {
     private(set) var exhaustMassFlow: Float = 0
     private(set) var turbineTorque: Float = 0
     private(set) var compressorLoad: Float = 0
+    private(set) var lpcLoad: Float = 0
+    private(set) var hpcLoad: Float = 0
     private(set) var stations: [PressureStation]
     private(set) var stageCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
 
     var fuel: Float = 0.6
-    var designPressureRatio: Float = TurbineConfig().defaultPressureRatio
+    var lpcPressureRatio: Float = 2.0
+    var hpcPressureRatio: Float = 2.0
     var jetIntensity: Float = 0.7
 
-    static let stationNames = ["1. Air Inlet", "2. Compressor Exit", "3. Combustor", "4. Manifold",
-                               "5. Turbine Rim", "6. Mid Disc", "7. Hub Ports", "8. Collector", "9. Rear Nozzle"]
+    static let stationNames = [
+        "1. Fan Inlet",
+        "2. Low-Pres Compressor",
+        "3. High-Pres Compressor",
+        "4. Combustion Chamber",
+        "5. High-Pres Turbine",
+        "6. Low-Pres Turbine",
+        "7. Collector Core",
+        "8. Exhaust Duct",
+        "9. Rear Nozzle"
+    ]
 
     init(config: TurbineConfig = TurbineConfig()) {
-            cfg = config
-            let count = config.gapCount * config.ringCount * config.sectorCount
-            particles = Array(repeating: GasParticle(), count: config.maxParticles)
-            occupancy = Array(repeating: 0, count: count)
-            flow = Array(repeating: FlowCell(), count: count)
-            nextFlow = flow
-            freeIDs = Array((0..<config.maxParticles).reversed())
+        cfg = config
+        let count = config.gapCount * config.ringCount * config.sectorCount
+        particles = Array(repeating: GasParticle(), count: config.maxParticles)
+        occupancy = Array(repeating: 0, count: count)
+        flow = Array(repeating: FlowCell(), count: count)
+        nextFlow = flow
+        freeIDs = Array((0..<config.maxParticles).reversed())
 
-            stations = TurbineCA.stationNames.enumerated().map {
-                PressureStation(id: $0.offset, name: $0.element, kPa: config.outletPressure / 1000.0, tempK: config.ambientTemperature)
-            }
-            initializeFlowField()
-            starterOn = true // Auto-start engine on launch so indicators update immediately
-            omega = 1.0      // Initial idle spin
+        stations = TurbineCA.stationNames.enumerated().map {
+            PressureStation(id: $0.offset, name: $0.element, kPa: config.outletPressure / 1000.0, tempK: config.ambientTemperature)
         }
+        initializeFlowField()
+        starterOn = true
+        omega = cfg.designOmega * 0.35 // Initial safe spin-up speed
+    }
 
     func reset() {
-            particles = Array(repeating: GasParticle(), count: cfg.maxParticles)
-            occupancy = Array(repeating: 0, count: occupancy.count)
-            freeIDs = Array((0..<cfg.maxParticles).reversed()) // Fixed from config.maxParticles to cfg.maxParticles
-            diskAngle = 0
-            omega = 1.0
-            starterOn = true
-            exhaustedTotal = 0
-            fuelUsedGrams = 0
-            thrust = 0
-            exhaustVelocity = 0
-            exhaustMassFlow = 0
-            turbineTorque = 0
-            compressorLoad = 0
-            stageCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
-            for k in 0..<stations.count {
-                stations[k].kPa = cfg.outletPressure / 1000.0
-                stations[k].tempK = cfg.ambientTemperature
-            }
-            initializeFlowField()
+        particles = Array(repeating: GasParticle(), count: cfg.maxParticles)
+        occupancy = Array(repeating: 0, count: occupancy.count)
+        freeIDs = Array((0..<cfg.maxParticles).reversed())
+        diskAngle = 0
+        omega = cfg.designOmega * 0.35
+        starterOn = true
+        exhaustedTotal = 0
+        fuelUsedGrams = 0
+        thrust = 0
+        exhaustVelocity = 0
+        exhaustMassFlow = 0
+        turbineTorque = 0
+        compressorLoad = 0
+        lpcLoad = 0
+        hpcLoad = 0
+        stageCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
+        for k in 0..<stations.count {
+            stations[k].kPa = cfg.outletPressure / 1000.0
+            stations[k].tempK = cfg.ambientTemperature
         }
+        initializeFlowField()
+    }
 
-   
-
-    func startEngine() { starterOn = true }
+    func startEngine() {
+        starterOn = true
+        if omega < 0.5 { omega = 1.0 }
+    }
 
     var activeCount: Int { particles.count - freeIDs.count }
     var shaftFraction: Float { omega / cfg.designOmega }
     var rpm: Float { shaftFraction * cfg.displayDesignRPM }
-    var flameTemp: Float { stations[2].tempK }
-    var overallPressureRatio: Float { stations[2].kPa / (cfg.outletPressure / 1000.0) }
+    var flameTemp: Float { stations[3].tempK }
+    var overallPressureRatio: Float { stations[3].kPa / (cfg.outletPressure / 1000.0) }
     var tsfc: Float { thrust > 1 ? fuelFlowGramsPerSec / (thrust / 1000) : 0 }
     var fuelFlowGramsPerSec: Float { fuel * cfg.maxFuelFlowGramsPerSec }
 
@@ -137,8 +152,9 @@ final class TurbineCA {
                 let radialFraction = log(radius / max(0.05, cfg.innerRingRadius))
                     / max(1.0e-5, log(cfg.diskRadius / max(0.05, cfg.innerRingRadius)))
                 let intensity = min(1, max(0, jetIntensity))
+                let combinedPR = max(1.0, lpcPressureRatio * hpcPressureRatio)
                 let pBase = cfg.outletPressure
-                    + ((cfg.inletPressure - cfg.outletPressure) * intensity
+                    + ((cfg.inletPressure - cfg.outletPressure) * intensity * combinedPR
                        - cfg.axialPressureDrop * intensity * axialFraction) * radialFraction
                 for t in 0..<cfg.sectorCount {
                     let temperature = cfg.ambientTemperature
@@ -186,12 +202,12 @@ final class TurbineCA {
         var starter: Float = 0
         if starterOn {
             if omega >= cfg.starterCutoff * cfg.designOmega { starterOn = false }
-            else { starter = cfg.starterTorque }
+            else { starter = cfg.starterTorque * 2.5 } // Ensure strong initial starter torque boost
         }
 
-        let netTorque = (turbineTorque - compressorLoad - cfg.rotorDrag * omega + starter)
+        let netTorque = (turbineTorque - compressorLoad - cfg.rotorDrag * omega + starter + 0.5)
         let angularAcceleration = netTorque / max(1.0e-5, cfg.rotorInertia)
-        omega = min(cfg.maxOmega, max(0, omega + angularAcceleration * dt))
+        omega = min(cfg.maxOmega, max(0.2, omega + angularAcceleration * dt))
     }
 
     private func solveFlowField(dt: Float) {
@@ -229,9 +245,9 @@ final class TurbineCA {
         let rOut = max(rIn + 0.01, cfg.diskRadius)
         let logSpan = max(1.0e-5, log(rOut / rIn))
         let intensity = min(1, max(0, jetIntensity)) * fuel
+        let combinedPR = max(1.0, lpcPressureRatio * hpcPressureRatio)
         let inletP = cfg.outletPressure
-            + max(0, cfg.inletPressure - cfg.outletPressure) * intensity
-            * max(1.0, designPressureRatio)
+            + max(0, cfg.inletPressure - cfg.outletPressure) * intensity * combinedPR
         let axialDrop = cfg.axialPressureDrop * intensity
         let oldFlow = flow
         nextFlow = oldFlow
@@ -304,13 +320,14 @@ final class TurbineCA {
         }
 
         flow = nextFlow
-        turbineTorque = calculatedTorque * cfg.turbineTorqueGain
-        compressorLoad = loadSum * cfg.compressorLoadGain * max(1.0, designPressureRatio)
+        turbineTorque = calculatedTorque * cfg.turbineTorqueGain * 1.5
+        lpcLoad = loadSum * 0.4 * max(1.0, lpcPressureRatio) * cfg.compressorLoadGain * 0.5
+        hpcLoad = loadSum * 0.6 * max(1.0, hpcPressureRatio) * cfg.compressorLoadGain * 0.5
+        compressorLoad = lpcLoad + hpcLoad
     }
 
     private func burnFuel(_ dt: Float) {
         guard fuel > 0.001 else { return }
-        let want = cfg.fuelGasPerTick * fuel
         let q = cfg.fuelEnergyPerTrustPerTick ?? (cfg.fuelEnergyPerTick * fuel * cfg.combustionEfficiency)
         fuelUsedGrams += fuelFlowGramsPerSec * dt
         for i in flow.indices {
@@ -333,7 +350,16 @@ final class TurbineCA {
         for g in 0..<cfg.gapCount {
             for r in 0..<nR {
                 let radius = ringRadius(r)
-                let stIdx = r >= 15 ? 4 : r >= 8 ? 5 : 6
+                let stIdx: Int
+                if r >= 17 { stIdx = 0 }      // 1. Fan Inlet
+                else if r >= 14 { stIdx = 1 } // 2. Low-Pres Compressor
+                else if r >= 10 { stIdx = 2 } // 3. High-Pres Compressor
+                else if r >= 7 { stIdx = 3 }  // 4. Combustion Chamber
+                else if r >= 5 { stIdx = 4 }  // 5. High-Pres Turbine
+                else if r >= 3 { stIdx = 5 }  // 6. Low-Pres Turbine
+                else if r >= 1 { stIdx = 6 }  // 7. Collector Core
+                else { stIdx = 7 }            // 8. Exhaust Duct
+
                 for t in 0..<cfg.sectorCount {
                     let c = flow[idx(g, r, t)]
                     pressureSum += c.pressure
@@ -358,12 +384,14 @@ final class TurbineCA {
         let meanP = pressureSum / max(1, count)
         let meanT = temperatureSum / max(1, count)
 
-        for k in 0..<9 {
+        for k in 0..<8 {
             let kPa = counts[k] > 0 ? (rSums[k] / counts[k]) / 1000.0 : meanP / 1000.0
             let tK = counts[k] > 0 ? tSums[k] / counts[k] : meanT
             stations[k].kPa = kPa
             stations[k].tempK = tK
         }
+        stations[8].kPa = cfg.outletPressure / 1000.0
+        stations[8].tempK = meanT * 0.85
 
         var stCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
         let active = activeCount
@@ -390,7 +418,7 @@ final class TurbineCA {
         let desired = cfg.maxInjectPerTick * max(0.2, min(1, jetIntensity * max(0.2, fuel))) * flowScale
         var count = Int(desired)
         if rng.unit() < desired - Float(count) { count += 1 }
-        count = max(1, count) // Ensure continuous particle generation
+        count = max(1, count)
         let outerRing = cfg.ringCount - 1
 
         while count > 0, let id = freeIDs.last {
@@ -487,27 +515,23 @@ final class TurbineCA {
     }
 
     func renderPosition(of p: GasParticle, alpha: Float) -> SCNVector3 {
-            let nT = cfg.sectorCount
-            var dT = p.t - p.pt
-            if dT > nT / 2 { dT -= nT }
-            else if dT < -nT / 2 { dT += nT }
-            let theta = (Float(p.pt) + Float(dT) * alpha + 0.5) * cfg.sectorAngle
-            let radius = ringRadius(p.pr) + (ringRadius(p.r) - ringRadius(p.pr)) * alpha
+        let nT = cfg.sectorCount
+        var dT = p.t - p.pt
+        if dT > nT / 2 { dT -= nT }
+        else if dT < -nT / 2 { dT += nT }
+        let theta = (Float(p.pt) + Float(dT) * alpha + 0.5) * cfg.sectorAngle
+        let radius = ringRadius(p.pr) + (ringRadius(p.r) - ringRadius(p.pr)) * alpha
 
-            let z: Float
-            if p.exhaustAge >= 0 {
-                // Exhaust plume shooting backward out the rear nozzle (-1.3 to -3.0)
-                let age = Float(p.exhaustAge) + alpha
-                z = -1.35 - age * 0.18
-            } else {
-                // Map particle radial rings (0 = hub/inner, outerRing = intake/outer rim)
-                // longitudinally along the engine body from intake (+1.3) to turbine (-0.5)
-                let ringProgress = Float(p.r) / Float(max(1, cfg.ringCount - 1))
-                // Outer rings map to intake/compressor (+1.3 to +0.2), inner rings map to turbine core (-0.2 to -0.6)
-                z = 1.3 - (ringProgress * 1.8) + p.yOffset * 0.1
-            }
-            return SCNVector3(radius * cos(theta), radius * sin(theta), z)
+        let z: Float
+        if p.exhaustAge >= 0 {
+            let age = Float(p.exhaustAge) + alpha
+            z = -1.35 - age * 0.18
+        } else {
+            let ringProgress = Float(p.r) / Float(max(1, cfg.ringCount - 1))
+            z = 1.3 - (ringProgress * 1.8) + p.yOffset * 0.1
         }
+        return SCNVector3(radius * cos(theta), radius * sin(theta), z)
+    }
 
     func visualScale(of p: GasParticle) -> Float {
         let heat = max(0, min(1, (p.temp - cfg.ambientTemperature) / 1000))
@@ -515,21 +539,4 @@ final class TurbineCA {
         if p.exhaustAge >= 0 { s *= 1 + 0.08 * Float(p.exhaustAge) }
         return s
     }
-}
-
-extension TurbineConfig {
-    var fuelEnergyPerTrustPerTick: Float? { nil }
-    var maxFlameTemp: Float { 1800 }
-    var maxFuelFlowGramsPerSec: Float { 60 }
-    var fuelEnergyPerTick: Float { 11000 }
-    var combustionEfficiency: Float { 0.98 }
-    var maxOmega: Float { 5.0 }
-    var designOmega: Float { 3.5 }
-    var starterTorque: Float { 2.5 }
-    var starterCutoff: Float { 0.55 }
-    var displayDesignRPM: Float { 24000 }
-    var turbineTorqueGain: Float { 0.015 }
-    var compressorLoadGain: Float { 0.05 }
-    var defaultPressureRatio: Float { 4.0 }
-    var specificHeatCp: Float { gamma * gasConstant / (gamma - 1) }
 }
