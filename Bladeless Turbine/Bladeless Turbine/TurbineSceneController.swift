@@ -40,7 +40,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var flightBank: Float = 0
     @Published var groundAvoid = false
     /// true: camera sits close to the left of the engine (whole engine in view); false: chase view.
-    @Published var sideCamera = true
+    @Published var sideCamera = false
 
     let cfg: TurbineConfig
     let sim: TurbineCA
@@ -365,7 +365,9 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         let p = SIMD2<Float>(flight.position.x, flight.position.z)
         if simd_distance(p, terrainCenter) > 1800 {
             terrainCenter = p
-            terrainNode.geometry = Terrain.mesh(centerX: p.x, centerZ: p.y)
+            terrainNode.childNodes.forEach { $0.removeFromParentNode() }
+            let meshNode = Terrain.mesh(centerX: p.x, centerZ: p.y)
+            terrainNode.addChildNode(meshNode)
         }
     }
 
@@ -532,4 +534,3 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 }
-
