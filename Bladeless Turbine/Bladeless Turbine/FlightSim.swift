@@ -72,35 +72,25 @@ final class FlightSim {
         let atm = EngineEquations.atmosphere(altitude: Double(position.y))
         let rho = Float(atm.p / (Double(cfg.gasConstant) * atm.t))
         let weight = cfg.aircraftMass * gravity
-        let momentum = cycle.exhaustFlow * cycle.exhaustVelocity
-        let airFlow = cycle.intakeAirFlow
-        let pressureForce = cycle.pressureThrust
         let climb = weight * forward.y
 
         func dragAt(_ v: Float) -> Float {
             let q = max(50, 0.5 * rho * v * v)
-            return q * cfg.wingArea * cfg.zeroLiftDrag
-                + cfg.inducedDragFactor * weight * weight / (q * cfg.wingArea)
+            let zeroLift = q * cfg.wingArea * cfg.zeroLiftDrag
+            let induced = cfg.inducedDragFactor * weight * weight / (q * cfg.wingArea)
+            return zeroLift + induced
         }
-        func excess(_ v: Float) -> Float { momentum - airFlow * v + pressureForce - dragAt(v) - climb }
 
-        var lo: Float = 10, hi: Float = 450
-        let target: Float
-        if excess(lo) <= 0 {
-            target = lo
-        } else if excess(hi) >= 0 {
-            target = hi
-        } else {
-            for _ in 0..<30 {
-                let mid = 0.5 * (lo + hi)
-                if excess(mid) > 0 { lo = mid } else { hi = mid }
-            }
-            target = 0.5 * (lo + hi)
-        }
-        equilibriumSpeed = target
-        speed += (target - speed) * (1 - exp(-dt / 4))
-        speed = max(10, min(450, speed))
-        drag = dragAt(speed)
+        // Real-time Newtonian motion model (F = ma integration)
+        let thrustForce = cycle.thrust
+        let dragForce = dragAt(speed)
+        let netForce = thrustForce - dragForce - climb
+        let acceleration = netForce / cfg.aircraftMass
+
+        speed += acceleration * dt
+        speed = max(0, min(450, speed))
+        drag = dragForce
+        equilibriumSpeed = speed
 
         // Ground-collision avoidance logic removed; tracking clearance only for telemetry
         let ground = Terrain.height(position.x, position.z)
@@ -140,7 +130,4 @@ final class FlightSim {
         position.y = min(position.y, 15_000)
     }
 }
-
-
-
 

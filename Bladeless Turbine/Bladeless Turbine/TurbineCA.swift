@@ -34,25 +34,19 @@ final class TurbineCA {
     private(set) var stations: [PressureStation]
     private(set) var stageCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
 
-    /// Closed-form cycle (intake flow, torques, exhaust force) — see EngineEquations.swift.
     let equations: EngineEquations
-    /// Engine shape shared with the SceneKit builders so tracers follow the casing.
     let layout: EngineLayout
     private(set) var cycle = CycleResult()
-    /// Torque the Tesla wall-shear integral of the flow field would give (diagnostic cross-check).
     private(set) var teslaShearTorque: Float = 0
 
-    /// Throttle position 0...1 (cutoff below 5 %).
     var fuel: Float = 0.6
     var lpcPressureRatio: Float = 2.0
     var hpcPressureRatio: Float = 2.0
     var jetIntensity: Float = 0.7
 
-    /// Flight condition fed to the cycle (altitude in m, true airspeed in m/s).
     var altitude: Float = 0
     var airspeed: Float = 0
 
-    /// Mass flow measured from the CA itself: tracer exits per second × mass per tracer.
     private(set) var measuredFlow: Float = 0
     private var exitEvents = 0
     private var windowTime: Float = 0
@@ -85,7 +79,7 @@ final class TurbineCA {
         }
         initializeFlowField()
         starterOn = true
-        omega = cfg.designOmega * 0.35 // Initial safe spin-up speed
+        omega = cfg.designOmega * 0.85
     }
 
     func reset() {
@@ -93,7 +87,7 @@ final class TurbineCA {
         occupancy = Array(repeating: 0, count: occupancy.count)
         freeIDs = Array((0..<cfg.maxParticles).reversed())
         diskAngle = 0
-        omega = cfg.designOmega * 0.35
+        omega = cfg.designOmega * 0.85
         starterOn = true
         exhaustedTotal = 0
         exitEvents = 0
@@ -119,10 +113,6 @@ final class TurbineCA {
         starterOn = true
     }
 
-    /// Fuel command after the throttle schedule and the overspeed governor.
-    ///   below 5 % throttle : fuel cut off
-    ///   otherwise          : idle fraction + (1 − idle) · throttle
-    ///   governor           : trims fuel linearly over `governorBand` above 100 % design speed
     var fuelCommand: Float {
         guard fuel >= 0.05 else { return 0 }
         let scheduled = cfg.idleFuelFraction + (1 - cfg.idleFuelFraction) * fuel
@@ -222,14 +212,12 @@ final class TurbineCA {
         let dt = 1 / max(1, cfg.tickRate)
         diskAngle = (diskAngle + omega * dt).truncatingRemainder(dividingBy: 2 * .pi)
 
-        // 1. Solve the cycle at the present shaft speed and fuel command.
         cycle = equations.solve(speedRatio: shaftFraction,
                                 fuelCommand: fuelCommand,
                                 overallPR: overallDesignPR,
                                 altitude: altitude,
                                 airspeed: airspeed)
 
-        // 2. Flow field, tracers and stations follow the cycle.
         solveFlowField(dt: dt)
         burnFuel(dt)
         updateStations()
@@ -249,7 +237,6 @@ final class TurbineCA {
             if particles[i].active { _ = advectTracer(i, dt: dt) }
         }
 
-        // 3. Shaft:  J · dΩ/dt = τ_turbine − τ_compressor − τ_friction + τ_starter
         var starter: Float = 0
         if starterOn {
             if shaftFraction >= cfg.starterCutoff { starterOn = false }
@@ -260,7 +247,7 @@ final class TurbineCA {
         lpcLoad = cycle.compressorTorque * 0.4
         hpcLoad = cycle.compressorTorque * 0.6
         let netTorque = cycle.turbineTorque - cycle.compressorTorque - cycle.frictionTorque + starter
-        let alpha = netTorque / max(1.0e-3, cfg.spoolInertia)                // rad/s²
+        let alpha = netTorque / max(1.0e-3, cfg.spoolInertia)
         let physicalOmega = shaftFraction * cfg.physicalDesignOmega + alpha * dt
         let newFraction = max(0.05, min(cfg.maxOmega / cfg.designOmega, physicalOmega / cfg.physicalDesignOmega))
         omega = newFraction * cfg.designOmega
@@ -300,9 +287,6 @@ final class TurbineCA {
         let rIn = max(0.05, cfg.innerRingRadius)
         let rOut = max(rIn + 0.01, cfg.diskRadius)
         let logSpan = max(1.0e-5, log(rOut / rIn))
-        // Boundary conditions come from the cycle equations:
-        //   rim (r = R)  : combustor exit  p₃, T₃
-        //   centre (r→0) : turbine exit    p₅
         let burning: Float = cycle.fuelAirRatio > 0 ? 1 : 0
         let intensity = burning * min(1.2, cycle.speedRatio)
         let rimTemperature = max(180, cycle.t3)
@@ -377,34 +361,30 @@ final class TurbineCA {
         teslaShearTorque = calculatedTorque * cfg.turbineTorqueGain
     }
 
-    /// Fuel burned is the cycle's ṁ_fuel = f · ṁ_air; the heat it releases is already in T₃.
     private func burnFuel(_ dt: Float) {
         fuelUsedGrams += fuelFlowGramsPerSec * dt
     }
-
-    // MARK: Stations and nozzle — all from the cycle equations
 
     private func updateStations() {
         let c = cycle
         let k = (cfg.gamma - 1) / cfg.gamma
         let etaC = cfg.compressorEfficiency, etaT = cfg.turbineEfficiency
 
-        // Split the compressor and the expansion into two equal-ratio halves.
         let piHalfC = c.compressorPR.squareRoot()
         let tLPC = c.t1 * (1 + (pow(piHalfC, k) - 1) / etaC)
         let piHalfT = c.turbinePR.squareRoot()
         let tHPT = c.t3 * (1 - etaT * (1 - pow(piHalfT, -k)))
 
         let values: [(Float, Float)] = [
-            (c.p1, c.t1),                       // 1. Fan inlet
-            (c.p1 * piHalfC, tLPC),             // 2. Low-pressure compressor exit
-            (c.p2, c.t2),                       // 3. High-pressure compressor exit
-            (c.p3, c.t3),                       // 4. Combustion chamber exit / Tesla rim
-            (c.p3 / piHalfT, tHPT),             // 5. First half of the Tesla expansion
-            (c.p5, c.t5),                       // 6. Tesla turbine exit
-            (c.p5 * 0.99, c.t5),                // 7. Collector core
-            (c.p5 * 0.98, c.t5),                // 8. Exhaust duct
-            (c.pe, c.te)                        // 9. Rear nozzle exit (static)
+            (c.p1, c.t1),
+            (c.p1 * piHalfC, tLPC),
+            (c.p2, c.t2),
+            (c.p3, c.t3),
+            (c.p3 / piHalfT, tHPT),
+            (c.p5, c.t5),
+            (c.p5 * 0.99, c.t5),
+            (c.p5 * 0.98, c.t5),
+            (c.pe, c.te)
         ]
         for i in 0..<min(values.count, stations.count) {
             stations[i].kPa = values[i].0 / 1000
@@ -413,7 +393,6 @@ final class TurbineCA {
 
         exhaustMassFlow = c.exhaustFlow
 
-        // Where the gas is right now (by tracer ring), for the stage panel.
         var counts = [Int](repeating: 0, count: EngineStage.allCases.count)
         for p in particles where p.active {
             let stage: EngineStage
@@ -428,14 +407,11 @@ final class TurbineCA {
         stageCounts = counts
     }
 
-    /// Exhaust force from the cycle:  F = ṁ·Vₑ + (pₑ − p₀)·Aₑ  (smoothed for display).
     private func updateNozzlePerformance() {
         exhaustVelocity += 0.2 * (cycle.exhaustVelocity - exhaustVelocity)
         thrust += 0.2 * (cycle.thrust - thrust)
     }
 
-    /// Each tracer carries `tracerMass` kg, so the injection rate is ṁ_e / m_tracer per second:
-    /// the CA is fed exactly the mass flow the thermodynamic cycle produces.
     private func injectTracers(dt: Float) {
         let desired = min(60, exhaustMassFlow * dt / max(1.0e-3, cfg.tracerMass))
         var count = Int(desired)
@@ -536,7 +512,6 @@ final class TurbineCA {
         return 0
     }
 
-    /// Tracer position in the engine-local frame (axis +X, gas flows toward +X).
     func renderPosition(of p: GasParticle, alpha: Float) -> SCNVector3 {
         let nT = cfg.sectorCount
         var dT = p.t - p.pt

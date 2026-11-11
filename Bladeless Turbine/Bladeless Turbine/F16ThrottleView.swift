@@ -1,4 +1,3 @@
-
 //
 //  F16ThrottleView.swift
 //  Bladeless Turbine
