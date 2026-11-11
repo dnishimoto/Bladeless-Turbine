@@ -47,7 +47,7 @@ struct TurbineConfig {
     var idleFuelFraction: Float = 0.45         // fuel command at the lowest throttle detent above cutoff
     var governorBand: Float = 0.06             // overspeed governor trims fuel over this band above 100 %
     // MARK: Aircraft (F-16 class)
-    var aircraftMass: Float = 12_000           // kg
+    var aircraftMass: Float = 8200           // kg
     var wingArea: Float = 27.9                 // m²
     var zeroLiftDrag: Float = 0.021
     var inducedDragFactor: Float = 0.12
