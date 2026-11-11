@@ -28,6 +28,10 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var compressorLoad: Float = 0
     @Published var starterOn = false
 
+    @Published var yaw: Float = 0
+    @Published var pitch: Float = 0
+    @Published var roll: Float = 0
+
     let cfg: TurbineConfig
     let sim: TurbineCA
     let scene = SCNScene()
@@ -66,6 +70,12 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         accumulator = 0
         for n in particleNodes { n.isHidden = true }
         for i in 0..<lastBand.count { lastBand[i] = -1 }
+    }
+
+    func setOrientation(yaw: Float, pitch: Float, roll: Float) {
+        self.yaw = yaw
+        self.pitch = pitch
+        self.roll = roll
     }
 
     private func metal(alpha: CGFloat, white: CGFloat = 0.6) -> SCNMaterial {
@@ -336,6 +346,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             }
         }
 
+        engineRoot.eulerAngles = SCNVector3(pitch, yaw, roll)
+
         hudTimer += frame
         if hudTimer > 0.12 {
             hudTimer = 0
@@ -369,3 +381,4 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 }
+

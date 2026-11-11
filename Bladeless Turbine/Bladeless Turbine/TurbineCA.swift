@@ -20,8 +20,8 @@ final class TurbineCA {
     private var rng = FastRNG()
 
     private(set) var diskAngle: Float = 0
-    private(set) var omega: Float = 1.0  // Start with positive idle omega
-    private(set) var starterOn = true   // Start enabled to spin up immediately
+    private(set) var omega: Float = 1.0  // Positive idle spin
+    private(set) var starterOn = true    // Starter active on launch
     private(set) var exhaustedTotal = 0
     private(set) var fuelUsedGrams: Float = 0
     private(set) var thrust: Float = 0
@@ -65,7 +65,7 @@ final class TurbineCA {
         }
         initializeFlowField()
         starterOn = true
-        omega = cfg.designOmega * 0.35 // Initial safe spin-up speed
+        omega = cfg.designOmega * 0.35 // Initial spin-up speed
     }
 
     func reset() {
@@ -202,7 +202,7 @@ final class TurbineCA {
         var starter: Float = 0
         if starterOn {
             if omega >= cfg.starterCutoff * cfg.designOmega { starterOn = false }
-            else { starter = cfg.starterTorque * 2.5 } // Ensure strong initial starter torque boost
+            else { starter = cfg.starterTorque * 2.5 }
         }
 
         let netTorque = (turbineTorque - compressorLoad - cfg.rotorDrag * omega + starter + 0.5)
@@ -253,6 +253,8 @@ final class TurbineCA {
         nextFlow = oldFlow
         var calculatedTorque: Float = 0
         var loadSum: Float = 0
+        
+        
 
         for g in 0..<cfg.gapCount {
             let gapFraction = Float(g) / Float(max(1, cfg.gapCount - 1))
@@ -320,9 +322,10 @@ final class TurbineCA {
         }
 
         flow = nextFlow
-        turbineTorque = calculatedTorque * cfg.turbineTorqueGain * 1.5
+        turbineTorque = calculatedTorque * cfg.turbineTorqueGain * 3.0
         lpcLoad = loadSum * 0.4 * max(1.0, lpcPressureRatio) * cfg.compressorLoadGain * 0.5
         hpcLoad = loadSum * 0.6 * max(1.0, hpcPressureRatio) * cfg.compressorLoadGain * 0.5
+               
         compressorLoad = lpcLoad + hpcLoad
     }
 
@@ -335,33 +338,46 @@ final class TurbineCA {
         }
     }
 
+  
+  
     private func updateStations() {
         guard !flow.isEmpty else { return }
+
         var pressureSum: Float = 0
         var temperatureSum: Float = 0
         var count: Float = 0
-        var mdotRaw: Float = 0
 
         let nR = cfg.ringCount
+
         var rSums = [Float](repeating: 0, count: 9)
         var tSums = [Float](repeating: 0, count: 9)
         var counts = [Float](repeating: 0, count: 9)
 
         for g in 0..<cfg.gapCount {
             for r in 0..<nR {
-                let radius = ringRadius(r)
                 let stIdx: Int
-                if r >= 17 { stIdx = 0 }      // 1. Fan Inlet
-                else if r >= 14 { stIdx = 1 } // 2. Low-Pres Compressor
-                else if r >= 10 { stIdx = 2 } // 3. High-Pres Compressor
-                else if r >= 7 { stIdx = 3 }  // 4. Combustion Chamber
-                else if r >= 5 { stIdx = 4 }  // 5. High-Pres Turbine
-                else if r >= 3 { stIdx = 5 }  // 6. Low-Pres Turbine
-                else if r >= 1 { stIdx = 6 }  // 7. Collector Core
-                else { stIdx = 7 }            // 8. Exhaust Duct
+
+                if r >= 17 {
+                    stIdx = 0
+                } else if r >= 14 {
+                    stIdx = 1
+                } else if r >= 10 {
+                    stIdx = 2
+                } else if r >= 7 {
+                    stIdx = 3
+                } else if r >= 5 {
+                    stIdx = 4
+                } else if r >= 3 {
+                    stIdx = 5
+                } else if r >= 1 {
+                    stIdx = 6
+                } else {
+                    stIdx = 7
+                }
 
                 for t in 0..<cfg.sectorCount {
                     let c = flow[idx(g, r, t)]
+
                     pressureSum += c.pressure
                     temperatureSum += c.temperature
                     count += 1
@@ -369,39 +385,67 @@ final class TurbineCA {
                     rSums[stIdx] += c.pressure
                     tSums[stIdx] += c.temperature
                     counts[stIdx] += 1
-
-                    if r == nR - 1 {
-                        let faceArea = radius * cfg.sectorAngle * cfg.effectiveFlowGap
-                        mdotRaw += c.density * max(0, -c.radialVelocity) * faceArea
-                    }
                 }
             }
         }
 
-        let scalingFactor: Float = 125.0 / max(1.0e-4, cfg.referenceMassFlow * 50.0)
-        exhaustMassFlow = max(0.1, mdotRaw * scalingFactor * max(0.1, fuel * jetIntensity))
+        // MARK: - Mass Flow
+
+        // Throttle command: lower-bounded, but not upper-clamped.
+        let throttleFraction = max(0.0, jetIntensity)
+
+        // Rotor speed relative to design speed.
+        // Values above design speed are permitted.
+        let speedFraction = max(
+            0.0,
+            omega / max(1.0, cfg.designOmega)
+        )
+
+        // Reference mass flow is 112 kg/s at the design operating point.
+        // Flow can exceed the reference value above design conditions.
+        exhaustMassFlow = cfg.referenceMassFlow
+            * throttleFraction
+            * speedFraction
+
+        // MARK: - Station averages
 
         let meanP = pressureSum / max(1, count)
         let meanT = temperatureSum / max(1, count)
 
         for k in 0..<8 {
-            let kPa = counts[k] > 0 ? (rSums[k] / counts[k]) / 1000.0 : meanP / 1000.0
-            let tK = counts[k] > 0 ? tSums[k] / counts[k] : meanT
+            let kPa = counts[k] > 0
+                ? (rSums[k] / counts[k]) / 1000.0
+                : meanP / 1000.0
+
+            let tK = counts[k] > 0
+                ? tSums[k] / counts[k]
+                : meanT
+
             stations[k].kPa = kPa
             stations[k].tempK = tK
         }
+
         stations[8].kPa = cfg.outletPressure / 1000.0
         stations[8].tempK = meanT * 0.85
 
-        var stCounts = [Int](repeating: 0, count: EngineStage.allCases.count)
+        // MARK: - Particle stage counts
+
+        var stCounts = [Int](
+            repeating: 0,
+            count: EngineStage.allCases.count
+        )
+
         let active = activeCount
+
         stCounts[0] = active / 5
         stCounts[1] = active / 4
         stCounts[2] = active / 4
         stCounts[3] = active / 3
         stCounts[4] = active / 4
+
         stageCounts = stCounts
     }
+
 
     private func updateNozzlePerformance() {
         let collectorP = stations[7].kPa * 1000.0
@@ -540,3 +584,4 @@ final class TurbineCA {
         return s
     }
 }
+

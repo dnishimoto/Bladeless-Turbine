@@ -23,8 +23,28 @@ struct TurbineConfig {
     var maxTangentialSpeed: Float = 180.0
     var inletTangentialSpeed: Float = 80.0     // Intensive fan/compressor face swirl component
     
-    // Scaled mass flow reference matching ~112 kg/s class engine core
-    var referenceMassFlow: Float = 0.12
+    // Design airflow used to scale the tracer particles (F100-PW-229 class: 112 kg/s)
+    var referenceMassFlow: Float = 112
+
+    // MARK: Cycle equations (see EngineEquations.swift) — SI units
+    var intakeTipRadius: Float = 0.44          // m, F100 inlet is 88 cm in diameter
+    var intakeHubRadius: Float = 0.14          // m
+    var designIntakeMach: Float = 0.50         // fan-face Mach number at 100 % speed
+    var physicalDesignOmega: Float = 2513      // rad/s (24,000 rpm)
+    var compressorEfficiency: Float = 0.85
+    var burnerEfficiency: Float = 0.98
+    var burnerPressureLoss: Float = 0.05
+    var turbineEfficiency: Float = 0.60        // Tesla disc stage (lower than a bladed turbine)
+    var lowerHeatingValue: Float = 43.0e6      // J/kg, jet fuel
+    var maxFuelAirRatio: Float = 0.035         // fuel-air ratio at full fuel command
+    var nozzleExitArea: Float = 0.46           // m²
+    var spoolInertia: Float = 25               // kg·m²
+    var starterPhysicalTorque: Float = 3000    // N·m
+    var frictionFraction: Float = 0.02         // friction torque / design compressor torque
+    var idleFuelFraction: Float = 0.22         // fuel command at the lowest throttle detent above cutoff
+    var governorBand: Float = 0.06             // overspeed governor trims fuel over this band above 100 %
+    var lpcPressureRatioDefault: Float = 2.0
+    var designOverallPR: Float { lpcPressureRatioDefault * defaultPressureRatio }
 
     // MARK: Rotor Geometry
 
@@ -226,4 +246,3 @@ enum EngineStage: Int, CaseIterable, Identifiable {
         }
     }
 }
-
