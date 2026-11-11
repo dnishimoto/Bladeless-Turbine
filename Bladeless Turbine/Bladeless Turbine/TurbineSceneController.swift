@@ -39,7 +39,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var flightPitch: Float = 0
     @Published var flightBank: Float = 0
     @Published var groundAvoid = false
-    @Published var sideCamera = false
+    /// true: camera sits close to the left of the engine (whole engine in view); false: chase view.
+    @Published var sideCamera = true
 
     let cfg: TurbineConfig
     let sim: TurbineCA
@@ -134,6 +135,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         scene.rootNode.addChildNode(terrainNode)
         scene.rootNode.addChildNode(flightNode)
         engineRoot.scale = SCNVector3(0.8, 0.8, 0.8)      // ≈ 5 m long
+        engineRoot.eulerAngles.y = .pi                    // intake faces the flight direction, exhaust trails
         flightNode.addChildNode(engineRoot)
 
         buildJetEngineBody()
@@ -157,7 +159,9 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
     private func addShell(_ profile: [SIMD2<Float>], material: SCNMaterial) {
         for i in 0..<(profile.count - 1) {
-            engineRoot.addChildNode(frustum(profile[i].x, profile[i].y, profile[i + 1].x, profile[i + 1].y, material: material))
+            let shell = frustum(profile[i].x, profile[i].y, profile[i + 1].x, profile[i + 1].y, material: material)
+            if !material.writesToDepthBuffer { shell.renderingOrder = 10 }
+            engineRoot.addChildNode(shell)
         }
     }
 
@@ -177,8 +181,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     }
 
     private func buildJetEngineBody() {
-        let coldMat = metal(alpha: 0.28, white: 0.7, tint: UIColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1))
-        let hotMat = metal(alpha: 0.28, white: 0.7, tint: UIColor(red: 0.95, green: 0.45, blue: 0.30, alpha: 1))
+        let coldMat = metal(alpha: 0.08, white: 0.7, tint: UIColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1))
+        let hotMat = metal(alpha: 0.08, white: 0.7, tint: UIColor(red: 0.95, green: 0.45, blue: 0.30, alpha: 1))
         let drumMat = metal(alpha: 1, white: 0.55)
         let bladeMat = metal(alpha: 1, white: 0.8)
         let statorMat = metal(alpha: 1, white: 0.5)
@@ -188,6 +192,15 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         combustorMaterial.emission.contents = UIColor(red: 1.0, green: 0.4, blue: 0.08, alpha: 1)
         combustorMaterial.emission.intensity = 0
         combustorMaterial.isDoubleSided = true
+
+        // Casings are see-through glass: tinted, unlit, and they never write depth, so
+        // every component behind them stays visible.
+        for m in [coldMat, hotMat] {
+            m.lightingModel = .constant
+            m.writesToDepthBuffer = false
+            m.readsFromDepthBuffer = true
+            m.transparency = 0.12
+        }
 
         // Casings and rotor drum (tapered compressor, hot section, converging nozzle, tail cone)
         addShell(layout.coldCasingProfile, material: coldMat)
@@ -356,25 +369,60 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 
+    /// Closed camera spline around the engine, in jet-local metres (x forward, y up, z right).
+    private static let orbitPoints: [SIMD3<Float>] = [
+        SIMD3( 0.4, 0.3, -3.6),   // left, mid-engine
+        SIMD3( 2.6, 0.9, -2.8),   // left, at the intake
+        SIMD3( 4.0, 0.5, -0.6),   // in front of the intake
+        SIMD3( 3.0, 1.7,  2.2),   // front right, above
+        SIMD3( 0.4, 0.7,  3.6),   // right, mid-engine
+        SIMD3(-2.2, 0.4,  2.9),   // right, at the Tesla discs / nozzle
+        SIMD3(-3.8, 0.9,  0.4),   // behind the exhaust
+        SIMD3(-2.5, 1.8, -2.3)    // left rear, above
+    ]
+    private var orbitT: Float = 0
+
+    private func catmullRom(_ pts: [SIMD3<Float>], _ t: Float) -> SIMD3<Float> {
+        let n = pts.count
+        let u = t - floor(t)
+        let f = u * Float(n)
+        let i = Int(f) % n
+        let x = f - Float(Int(f))
+        let p0 = pts[(i + n - 1) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n]
+        let x2 = x * x, x3 = x2 * x
+        let c1: SIMD3<Float> = (p2 - p0) * x
+        let c2: SIMD3<Float> = (p0 * 2 - p1 * 5 + p2 * 4 - p3) * x2
+        let c3: SIMD3<Float> = (p1 * 3 - p0 - p2 * 3 + p3) * x3
+        let sum: SIMD3<Float> = p1 * 2 + c1 + c2 + c3
+        return sum * 0.5
+    }
+
     private func updateCamera(dt: Float) {
         let f = flight.forward, pos = flight.position
         let worldUp = SIMD3<Float>(0, 1, 0)
-        let target: SIMD3<Float>
-        let look: SIMD3<Float>
+        cameraNode.camera?.projectionDirection = .vertical
+        cameraNode.camera?.fieldOfView = sideCamera ? 60 : 50
+
         if sideCamera {
-            // Side view of the engine: flow runs left → right.
-            var side = simd_cross(f, worldUp)
-            if simd_length(side) < 0.05 { side = SIMD3(0, 0, 1) }
-            side = simd_normalize(side)
-            target = pos + side * 11 + worldUp * 1.2 - f * 0.4
-            look = pos - f * 0.4
-        } else {
-            target = pos - f * 15 + worldUp * 4.5
-            look = pos + f * 8
+            // Orbit: follow the spline around the engine, always looking at the engine axis.
+            orbitT += dt / 30                                   // one lap every 30 s
+            let local = catmullRom(Self.orbitPoints, orbitT)
+            let q = flight.orientation
+            let camPos = pos + q.act(local)
+            let focusX = max(-1.8, min(2.2, local.x * 0.6)) + 0.4   // look along the engine as we pass
+            let focus = pos + q.act(SIMD3(focusX, 0, 0))
+            let up = q.act(worldUp)
+            cameraPosition = camPos
+            cameraNode.simdPosition = camPos
+            cameraNode.look(at: SCNVector3(focus.x, focus.y, focus.z), up: SCNVector3(up.x, up.y, up.z),
+                            localFront: SCNVector3(0, 0, -1))
+            return
         }
+
+        let target = pos - f * 15 + worldUp * 4.5
+        let look = pos + f * 8
         let k = 1 - exp(-8 * dt)
         cameraPosition = (cameraPosition == .zero) ? target : cameraPosition + (target - cameraPosition) * k
-        // Keep the camera out of the ground too.
         let minY = Terrain.height(cameraPosition.x, cameraPosition.z) + 3
         cameraPosition.y = max(cameraPosition.y, minY)
         cameraNode.simdPosition = cameraPosition
@@ -390,10 +438,10 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         let frame = min(Float(time - lastTime), 0.1)
         lastTime = time
 
-        // Flight: engine thrust (from the cycle) drives speed; altitude and speed feed back into the cycle.
+        // Flight: the engine's mass flow sets the speed; altitude and speed feed back into the cycle.
         sim.altitude = flight.altitude
         sim.airspeed = flight.speed
-        flight.step(dt: frame, thrust: sim.thrust)
+        flight.step(dt: frame, cycle: sim.cycle)
         flightNode.simdPosition = flight.position
         flightNode.simdOrientation = flight.orientation
         updateTerrain()

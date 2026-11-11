@@ -27,7 +27,7 @@ final class FlightSim {
 
     var position = SIMD3<Float>(0, 900, 0)
     var orientation = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))   // nose along +X
-    var speed: Float = 170
+    var speed: Float = 200
 
     /// Pilot inputs, −1…1:  roll right +, pitch up +, rudder right +.
     var stickRoll: Float = 0
@@ -37,8 +37,10 @@ final class FlightSim {
     private(set) var groundAvoid = false
     private(set) var clearance: Float = 900
     private(set) var drag: Float = 0
+    /// Speed at which the current mass-flow thrust equals drag.
+    private(set) var equilibriumSpeed: Float = 0
 
-    static let safeClearance: Float = 140
+    static let safeClearance: Float = 50
     static let floorClearance: Float = 7
     private let gravity: Float = 9.80665
 
@@ -63,7 +65,7 @@ final class FlightSim {
     func reset() {
         position = SIMD3(0, Terrain.height(0, 0) + 700, 0)
         orientation = simd_quatf(angle: 0, axis: SIMD3(0, 1, 0))
-        speed = 170
+        speed = 200
         stickRoll = 0; stickPitch = 0; rudder = 0
         groundAvoid = false
     }
@@ -71,31 +73,61 @@ final class FlightSim {
     private func projectedClearance() -> Float {
         var lowest = Float.greatestFiniteMagnitude
         let f = forward
-        for t in [0.5, 1.0, 2.0, 3.0] as [Float] {
+        for t in [0.5, 1.0, 1.5] as [Float] {
             let p = position + f * (max(60, speed) * t)
             lowest = min(lowest, p.y - Terrain.height(p.x, p.z))
         }
         return lowest
     }
 
-    /// Advance by `dt`; `thrust` is the engine's net force (N) from the cycle.
-    func step(dt: Float, thrust: Float) {
+    /// Advance by `dt`. Speed is set by the engine's mass flow:
+    ///   F(V) = ṁ_e·V_e − ṁ_air·V + (p_e − p₀)·A_e        (gross momentum − ram drag + pressure)
+    ///   D(V) = q·S·C_D0 + k·W²/(q·S)
+    /// The speed the jet settles at is the V where F(V) = D(V) + W·sin γ; the jet's speed
+    /// follows that value with a short lag. More mass flow → higher equilibrium speed.
+    func step(dt: Float, cycle: CycleResult) {
         let atm = EngineEquations.atmosphere(altitude: Double(position.y))
         let rho = Float(atm.p / (Double(cfg.gasConstant) * atm.t))
-        let q = max(50, 0.5 * rho * speed * speed)
         let weight = cfg.aircraftMass * gravity
-        drag = q * cfg.wingArea * cfg.zeroLiftDrag
-            + cfg.inducedDragFactor * weight * weight / (q * cfg.wingArea)
+        let momentum = cycle.exhaustFlow * cycle.exhaustVelocity
+        let airFlow = cycle.intakeAirFlow
+        let pressureForce = cycle.pressureThrust
+        let climb = weight * forward.y
 
-        speed += ((thrust - drag) / cfg.aircraftMass - gravity * forward.y) * dt
+        func dragAt(_ v: Float) -> Float {
+            let q = max(50, 0.5 * rho * v * v)
+            return q * cfg.wingArea * cfg.zeroLiftDrag
+                + cfg.inducedDragFactor * weight * weight / (q * cfg.wingArea)
+        }
+        func excess(_ v: Float) -> Float { momentum - airFlow * v + pressureForce - dragAt(v) - climb }
+
+        var lo: Float = 20, hi: Float = 450
+        let target: Float
+        if excess(lo) <= 0 { target = lo }
+        else if excess(hi) >= 0 { target = hi }
+        else {
+            for _ in 0..<30 {
+                let mid = 0.5 * (lo + hi)
+                if excess(mid) > 0 { lo = mid } else { hi = mid }
+            }
+            target = 0.5 * (lo + hi)
+        }
+        equilibriumSpeed = target
+        speed += (target - speed) * (1 - exp(-dt / 4))
         speed = max(20, min(450, speed))
+        drag = dragAt(speed)
 
         // Ground-collision avoidance overrides the stick
         let ground = Terrain.height(position.x, position.z)
         clearance = position.y - ground
-        groundAvoid = projectedClearance() < Self.safeClearance
+        // Safety net only: the pilot stays in control unless the jet is about to hit the ground,
+        // and a pilot who is already pulling up is never overridden.
+        let pilotPullingUp = stickPitch > 0.2
+        groundAvoid = projectedClearance() < Self.safeClearance && !(pilotPullingUp && clearance > 30)
 
-        var rollCmd = stickRoll, pitchCmd = stickPitch
+        // Stick left/right commands a bank angle (up to 60°) and a turn; released = wings level.
+        let bankTarget = stickRoll * 1.05
+        var rollCmd = max(-1, min(1, (bankTarget - bank) * 3)), pitchCmd = stickPitch
         if groundAvoid {
             rollCmd = max(-1, min(1, -bank * 2.5))               // wings level
             pitchCmd = abs(bank) < 1.0 ? 1 : 0.1                 // then pull up
@@ -110,13 +142,14 @@ final class FlightSim {
 
         // Coordinated turn from bank angle
         let turn = max(-0.6, min(0.6, gravity * tan(max(-1.3, min(1.3, bank))) / max(60, speed)))
-        orientation = simd_quatf(angle: -turn * dt, axis: yAxis) * orientation
+        let yawAssist: Float = groundAvoid ? 0 : stickRoll * 0.35          // rad/s extra turn authority
+        orientation = simd_quatf(angle: (-turn - yawAssist) * dt, axis: yAxis) * orientation
         orientation = simd_normalize(orientation)
 
         // Position, stall sink
         position += forward * speed * dt
         if speed < cfg.stallSpeed {
-            position.y -= (cfg.stallSpeed - speed) / cfg.stallSpeed * 40 * dt
+            position.y -= (cfg.stallSpeed - speed) / cfg.stallSpeed * 15 * dt
         }
 
         // Hard floor: never inside the terrain

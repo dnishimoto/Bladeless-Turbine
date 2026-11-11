@@ -75,7 +75,6 @@ struct CycleResult {
     var choked = false
 }
 
-
 struct EngineEquations {
     let cfg: TurbineConfig
 

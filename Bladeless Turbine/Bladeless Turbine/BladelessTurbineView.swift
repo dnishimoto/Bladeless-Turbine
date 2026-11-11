@@ -66,7 +66,6 @@ struct PressureOverlay: View {
 struct BladelessTurbineView: View {
     @StateObject private var controller = TurbineSceneController()
     @State private var fuel: Double = 0.6
-    @State private var rudder: Double = 0
     @State private var pressureRatio: Double = Double(TurbineConfig().defaultPressureRatio)
 
     var body: some View {
@@ -130,14 +129,7 @@ struct BladelessTurbineView: View {
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
 
-    // MARK: Bottom: equations + controls
-
-    private var bottomBar: some View {
-        let c = controller.cycle
-        return VStack(spacing: 4) {
             HStack(alignment: .top, spacing: 6) {
                 eqCard("MASS FLOW  ṁ = A·p₀₃/√T₀₃·F(γ)", [
                     String(format: "air %.1f kg/s  fan M %.2f", c.intakeAirFlow, c.intakeMach),
@@ -153,38 +145,21 @@ struct BladelessTurbineView: View {
                 ])
             }
 
-            HStack(spacing: 10) {
-                VStack(spacing: 4) {
-                    Button("START") { controller.startEngine() }
-                        .font(.system(size: 10, weight: .bold))
-                        .buttonStyle(.borderedProminent)
-                        .tint(.blue)
-                    Button("RESET") { controller.reset() }
-                        .font(.system(size: 10, weight: .bold))
-                        .buttonStyle(.bordered)
-                        .tint(.red)
-                }
+        }
+    }
 
-                VStack(spacing: 2) {
-                    HStack {
-                        Text("THROTTLE").font(.system(size: 9, weight: .bold, design: .monospaced))
-                        Spacer()
-                        Text(fuel < 0.05 ? "OFF" : String(format: "%.0f%%", fuel * 100))
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    }
-                    Slider(value: $fuel, in: 0...1)
-                        .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
-                    HStack {
-                        Text("RUDDER").font(.system(size: 9, weight: .bold, design: .monospaced))
-                        Slider(value: $rudder, in: -1...1, onEditingChanged: { editing in
-                            if !editing { rudder = 0; controller.setRudder(0) }
-                        })
-                        .onChange(of: rudder) { _, v in controller.setRudder(Float(v)) }
-                    }
-                    Button(controller.sideCamera ? "CAMERA: SIDE" : "CAMERA: CHASE") { controller.toggleCamera() }
-                        .font(.system(size: 9, weight: .bold))
-                        .buttonStyle(.bordered)
-                }
+    // MARK: Bottom: equations + controls
+
+    private var bottomBar: some View {
+        VStack(spacing: 4) {
+            HStack(spacing: 10) {
+                F16ThrottleView(throttle: $fuel)
+                    .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
+
+                Button(controller.sideCamera ? "CAMERA\nORBIT" : "CAMERA\nCHASE") { controller.toggleCamera() }
+                    .font(.system(size: 9, weight: .bold))
+                    .multilineTextAlignment(.center)
+                    .buttonStyle(.bordered)
 
                 JoystickView { roll, pitch in controller.setStick(roll: roll, pitch: pitch) }
             }
@@ -215,23 +190,26 @@ struct BladelessTurbineView: View {
     }
 }
 
-/// Virtual flight stick: drag right = roll right, drag up = pitch up (nose up). Springs back to centre.
+/// One flight stick: drag left/right to bank and turn, up/down to pitch. Springs back to centre.
 struct JoystickView: View {
     let onChange: (Float, Float) -> Void
-    private let size: CGFloat = 92
+    private let size: CGFloat = 110
     @State private var offset: CGSize = .zero
 
     var body: some View {
-        let radius = size / 2 - 14
+        let radius = size / 2 - 16
         ZStack {
             Circle().fill(.white.opacity(0.10))
             Circle().stroke(.white.opacity(0.35), lineWidth: 1)
             Rectangle().fill(.white.opacity(0.2)).frame(width: 1, height: size - 12)
             Rectangle().fill(.white.opacity(0.2)).frame(width: size - 12, height: 1)
-            Circle().fill(.cyan.opacity(0.85)).frame(width: 28, height: 28).offset(offset)
-            VStack { Text("PITCH").font(.system(size: 7, design: .monospaced)); Spacer() }
-                .padding(.top, 2).foregroundStyle(.secondary)
+            Image(systemName: "arrow.up").font(.system(size: 9)).offset(y: -size / 2 + 8)
+            Image(systemName: "arrow.down").font(.system(size: 9)).offset(y: size / 2 - 8)
+            Image(systemName: "arrow.left").font(.system(size: 9)).offset(x: -size / 2 + 8)
+            Image(systemName: "arrow.right").font(.system(size: 9)).offset(x: size / 2 - 8)
+            Circle().fill(.cyan.opacity(0.85)).frame(width: 32, height: 32).offset(offset)
         }
+        .foregroundStyle(.secondary)
         .frame(width: size, height: size)
         .contentShape(Circle())
         .gesture(
