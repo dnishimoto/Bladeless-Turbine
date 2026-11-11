@@ -7,6 +7,7 @@ import SwiftUI
 import Combine
 import SceneKit
 import UIKit
+import simd
 
 final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, ObservableObject {
 
@@ -27,22 +28,35 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var turbineTorque: Float = 0
     @Published var compressorLoad: Float = 0
     @Published var starterOn = false
-
-    @Published var yaw: Float = 0
-    @Published var pitch: Float = 0
-    @Published var roll: Float = 0
+    @Published var cycle = CycleResult()
+    @Published var netTorque: Float = 0
+    @Published var measuredFlow: Float = 0
+    @Published var flightAltitude: Float = 0
+    @Published var flightClearance: Float = 0
+    @Published var flightSpeed: Float = 0
+    @Published var flightMach: Float = 0
+    @Published var flightHeading: Float = 0
+    @Published var flightPitch: Float = 0
+    @Published var flightBank: Float = 0
+    @Published var groundAvoid = false
+    @Published var sideCamera = false
 
     let cfg: TurbineConfig
     let sim: TurbineCA
+    let layout: EngineLayout
+    let flight: FlightSim
     let scene = SCNScene()
     let cameraNode = SCNNode()
 
+    private let flightNode = SCNNode()
     private let engineRoot = SCNNode()
+    private let terrainNode = SCNNode()
+    private var terrainCenter = SIMD2<Float>(repeating: .greatestFiniteMagnitude)
+    private var cameraPosition = SIMD3<Float>(0, 0, 0)
     private let turbineSpinNode = SCNNode()
     private let compressorSpinNode = SCNNode()
     private let fanSpinNode = SCNNode()
     private let combustorMaterial = SCNMaterial()
-    private let injectorMaterial = SCNMaterial()
 
     private var particleNodes: [SCNNode] = []
     private var lastBand: [Int8]
@@ -55,6 +69,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     init(config: TurbineConfig = TurbineConfig()) {
         cfg = config
         sim = TurbineCA(config: config)
+        layout = sim.layout
+        flight = FlightSim(config: config)
         lastBand = Array(repeating: -1, count: config.maxParticles)
         super.init()
         buildScene()
@@ -64,24 +80,22 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     func setFuel(_ v: Float) { sim.fuel = v }
     func setPressureRatio(_ v: Float) { sim.hpcPressureRatio = v }
     func startEngine() { sim.startEngine() }
+    func setStick(roll: Float, pitch: Float) { flight.stickRoll = roll; flight.stickPitch = pitch }
+    func setRudder(_ v: Float) { flight.rudder = v }
+    func toggleCamera() { sideCamera.toggle() }
 
     func reset() {
         sim.reset()
+        flight.reset()
         accumulator = 0
         for n in particleNodes { n.isHidden = true }
         for i in 0..<lastBand.count { lastBand[i] = -1 }
     }
 
-    func setOrientation(yaw: Float, pitch: Float, roll: Float) {
-        self.yaw = yaw
-        self.pitch = pitch
-        self.roll = roll
-    }
-
-    private func metal(alpha: CGFloat, white: CGFloat = 0.6) -> SCNMaterial {
+    private func metal(alpha: CGFloat, white: CGFloat = 0.6, tint: UIColor? = nil) -> SCNMaterial {
         let m = SCNMaterial()
         m.lightingModel = .physicallyBased
-        m.diffuse.contents = UIColor(white: white, alpha: 1)
+        m.diffuse.contents = tint ?? UIColor(white: white, alpha: 1)
         m.metalness.contents = 0.9
         m.roughness.contents = 0.4
         m.isDoubleSided = true
@@ -90,153 +104,185 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     }
 
     private func buildScene() {
-        scene.background.contents = UIColor(red: 0.02, green: 0.02, blue: 0.05, alpha: 1)
+        // Sky, fog and a camera that follows the jet (see updateCamera).
+        let sky = UIColor(red: 0.55, green: 0.70, blue: 0.90, alpha: 1)
+        scene.background.contents = sky
+        scene.fogColor = sky
+        scene.fogStartDistance = 2500
+        scene.fogEndDistance = 7000
 
         let cam = SCNCamera()
-        cam.zNear = 0.05
-        cam.zFar = 60
-        cam.fieldOfView = 45
+        cam.zNear = 0.3
+        cam.zFar = 9000
+        cam.fieldOfView = 50
         cameraNode.camera = cam
-        cameraNode.position = SCNVector3(0, 1.8, 4.5)
-        cameraNode.look(at: SCNVector3(0, 0, -0.2))
         scene.rootNode.addChildNode(cameraNode)
 
         let ambient = SCNNode()
         ambient.light = SCNLight()
         ambient.light?.type = .ambient
-        ambient.light?.intensity = 400
+        ambient.light?.intensity = 500
         scene.rootNode.addChildNode(ambient)
 
         let key = SCNNode()
         key.light = SCNLight()
         key.light?.type = .directional
         key.light?.intensity = 1000
-        key.eulerAngles = SCNVector3(-0.8, 0.5, 0)
+        key.eulerAngles = SCNVector3(-0.6, 0.4, 0)
         scene.rootNode.addChildNode(key)
 
-        scene.rootNode.addChildNode(engineRoot)
+        scene.rootNode.addChildNode(terrainNode)
+        scene.rootNode.addChildNode(flightNode)
+        engineRoot.scale = SCNVector3(0.8, 0.8, 0.8)      // ≈ 5 m long
+        flightNode.addChildNode(engineRoot)
 
         buildJetEngineBody()
+        buildLabels()
         buildParticles()
     }
 
+    // MARK: Geometry helpers (engine axis = +X)
+
+    /// Tapered shell segment between (x0, r0) and (x1, r1).
+    private func frustum(_ x0: Float, _ r0: Float, _ x1: Float, _ r1: Float, material: SCNMaterial) -> SCNNode {
+        let cone = SCNCone(topRadius: CGFloat(max(0.0005, r1)), bottomRadius: CGFloat(max(0.0005, r0)),
+                           height: CGFloat(max(0.001, x1 - x0)))
+        cone.radialSegmentCount = 48
+        cone.firstMaterial = material
+        let n = SCNNode(geometry: cone)
+        n.eulerAngles.z = -.pi / 2          // cone axis +Y → +X
+        n.position = SCNVector3((x0 + x1) / 2, 0, 0)
+        return n
+    }
+
+    private func addShell(_ profile: [SIMD2<Float>], material: SCNMaterial) {
+        for i in 0..<(profile.count - 1) {
+            engineRoot.addChildNode(frustum(profile[i].x, profile[i].y, profile[i + 1].x, profile[i + 1].y, material: material))
+        }
+    }
+
+    private func radialBlades(count: Int, x: Float, rIn: Float, rOut: Float, thickness: Float,
+                              chord: Float, twist: Float, material: SCNMaterial, parent: SCNNode) {
+        let h = max(0.01, rOut - rIn)
+        for k in 0..<count {
+            let holder = SCNNode()
+            holder.eulerAngles.x = Float(k) * 2 * .pi / Float(count)
+            let blade = SCNNode(geometry: SCNBox(width: CGFloat(chord), height: CGFloat(h), length: CGFloat(thickness), chamferRadius: 0))
+            blade.geometry?.firstMaterial = material
+            blade.position = SCNVector3(x, rIn + h / 2, 0)
+            blade.eulerAngles.y = twist
+            holder.addChildNode(blade)
+            parent.addChildNode(holder)
+        }
+    }
+
     private func buildJetEngineBody() {
-        let casingMat = metal(alpha: 0.35, white: 0.7)
+        let coldMat = metal(alpha: 0.28, white: 0.7, tint: UIColor(red: 0.45, green: 0.65, blue: 0.95, alpha: 1))
+        let hotMat = metal(alpha: 0.28, white: 0.7, tint: UIColor(red: 0.95, green: 0.45, blue: 0.30, alpha: 1))
+        let drumMat = metal(alpha: 1, white: 0.55)
+        let bladeMat = metal(alpha: 1, white: 0.8)
+        let statorMat = metal(alpha: 1, white: 0.5)
+
         combustorMaterial.lightingModel = .blinn
         combustorMaterial.diffuse.contents = UIColor(red: 0.35, green: 0.2, blue: 0.15, alpha: 1)
         combustorMaterial.emission.contents = UIColor(red: 1.0, green: 0.4, blue: 0.08, alpha: 1)
         combustorMaterial.emission.intensity = 0
         combustorMaterial.isDoubleSided = true
-        combustorMaterial.transparency = 0.35
 
-        // Fan Cowling
-        let intakeCyl = SCNCylinder(radius: 0.38, height: 0.4)
-        intakeCyl.firstMaterial = casingMat
-        let intakeNode = SCNNode(geometry: intakeCyl)
-        intakeNode.eulerAngles.x = .pi / 2
-        intakeNode.position = SCNVector3(0, 0, 1.4)
-        engineRoot.addChildNode(intakeNode)
+        // Casings and rotor drum (tapered compressor, hot section, converging nozzle, tail cone)
+        addShell(layout.coldCasingProfile, material: coldMat)
+        addShell(layout.hotCasingProfile, material: hotMat)
+        addShell(layout.drumProfile, material: drumMat)
+        addShell(layout.tailConeProfile, material: drumMat)
 
-        // Nose Cone
-        let noseCone = SCNCone(topRadius: 0, bottomRadius: 0.14, height: 0.3)
-        noseCone.firstMaterial = metal(alpha: 1, white: 0.8)
-        let noseNode = SCNNode(geometry: noseCone)
-        noseNode.eulerAngles.x = .pi / 2
-        noseNode.position = SCNVector3(0, 0, 1.5)
-        engineRoot.addChildNode(noseNode)
+        // Intake fan (spins with the fan node)
+        engineRoot.addChildNode(fanSpinNode)
+        radialBlades(count: 18, x: layout.xLip + 0.05, rIn: 0.10, rOut: 0.55, thickness: 0.012,
+                     chord: 0.10, twist: 0.5, material: bladeMat, parent: fanSpinNode)
 
-        // Fan Blades
-        let fanHolder = SCNNode()
-        fanHolder.position = SCNVector3(0, 0, 1.25)
-        engineRoot.addChildNode(fanHolder)
-        fanHolder.addChildNode(fanSpinNode)
-        for k in 0..<16 {
-            let blade = SCNNode(geometry: SCNBox(width: 0.34, height: 0.006, length: 0.03, chamferRadius: 0))
-            blade.geometry?.firstMaterial = metal(alpha: 1, white: 0.6)
-            blade.eulerAngles.z = Float(k) * 2 * .pi / 16
-            fanSpinNode.addChildNode(blade)
+        // Compressor: 4 rotor rows (spin) interleaved with fixed stator rows
+        engineRoot.addChildNode(compressorSpinNode)
+        for row in 0..<4 {
+            let t = (Float(row) + 0.5) / 4
+            let x = layout.lerp(layout.xCompStart, layout.xCompEnd, t)
+            let rIn = layout.lerp(0.11, 0.26, t)
+            let rOut = layout.lerp(0.52, 0.40, t)
+            radialBlades(count: 20 - row, x: x, rIn: rIn, rOut: rOut - 0.02, thickness: 0.008,
+                         chord: 0.12, twist: 0.45, material: bladeMat, parent: compressorSpinNode)
+
+            let xs = x + 0.2 * (layout.xCompEnd - layout.xCompStart) / 4
+            radialBlades(count: 22 - row, x: xs, rIn: layout.lerp(0.11, 0.26, t + 0.12), rOut: layout.lerp(0.52, 0.40, t + 0.12),
+                         thickness: 0.008, chord: 0.10, twist: -0.45, material: statorMat, parent: engineRoot)
         }
 
-        // Low-Pressure & High-Pressure Compressor Stages
-        let compCyl = SCNCylinder(radius: 0.28, height: 1.0)
-        compCyl.firstMaterial = casingMat
-        let compNode = SCNNode(geometry: compCyl)
-        compNode.eulerAngles.x = .pi / 2
-        compNode.position = SCNVector3(0, 0, 0.55)
-        engineRoot.addChildNode(compNode)
-
-        let compRotorHolder = SCNNode()
-        compRotorHolder.position = SCNVector3(0, 0, 0.55)
-        engineRoot.addChildNode(compRotorHolder)
-        compRotorHolder.addChildNode(compressorSpinNode)
-
-        // LPC blades (front) + HPC blades (rear)
-        for s in 0..<7 {
-            let zOffset = Float(s) * 0.14 - 0.42
-            let bladeCount = s < 3 ? 8 : 10
-            for k in 0..<bladeCount {
-                let blade = SCNNode(geometry: SCNBox(width: s < 3 ? 0.24 : 0.18, height: 0.005, length: 0.015, chamferRadius: 0))
-                blade.geometry?.firstMaterial = metal(alpha: 1, white: 0.75)
-                blade.position = SCNVector3(0, 0, zOffset)
-                blade.eulerAngles.z = Float(k) * 2 * .pi / Float(bladeCount) + Float(s) * 0.2
-                compressorSpinNode.addChildNode(blade)
-            }
+        // Annular combustor: glowing flame cans around the shaft
+        let cans = 10
+        let canX0 = layout.xCompEnd + 0.12, canX1 = layout.xCombEnd + 0.02
+        for k in 0..<cans {
+            let holder = SCNNode()
+            holder.eulerAngles.x = Float(k) * 2 * .pi / Float(cans)
+            let cyl = SCNCylinder(radius: 0.075, height: CGFloat(canX1 - canX0))
+            cyl.firstMaterial = combustorMaterial
+            let can = SCNNode(geometry: cyl)
+            can.eulerAngles.z = .pi / 2
+            can.position = SCNVector3((canX0 + canX1) / 2, 0.45, 0)
+            holder.addChildNode(can)
+            engineRoot.addChildNode(holder)
         }
 
-        // Combustion Chamber
-        let combustorCyl = SCNCylinder(radius: 0.32, height: 0.45)
-        combustorCyl.firstMaterial = combustorMaterial
-        let combNode = SCNNode(geometry: combustorCyl)
-        combNode.eulerAngles.x = .pi / 2
-        combNode.position = SCNVector3(0, 0, -0.05)
-        engineRoot.addChildNode(combNode)
+        // Tesla disc turbine: disc normal along +X, spins about the engine axis
+        let stackHolder = SCNNode()
+        stackHolder.position = SCNVector3(layout.stackCenterX, 0, 0)
+        stackHolder.eulerAngles.y = .pi / 2        // local +Z → world +X
+        engineRoot.addChildNode(stackHolder)
+        stackHolder.addChildNode(turbineSpinNode)
 
-        // High-Pressure & Low-Pressure Turbines
-        engineRoot.addChildNode(turbineSpinNode)
-        turbineSpinNode.position = SCNVector3(0, 0, -0.45)
-
-        let diskMat = metal(alpha: 0.85, white: 0.9)
+        let diskMat = metal(alpha: 0.9, white: 0.9)
         let solidDisk = Self.diskGeometry(cfg, withHoles: false)
         let drilledDisk = Self.diskGeometry(cfg, withHoles: true)
         solidDisk.materials = [diskMat]
         drilledDisk.materials = [diskMat]
-
         for i in 0..<cfg.diskCount {
             let node = SCNNode(geometry: i < 3 ? solidDisk : drilledDisk)
-            node.position.z = sim.diskZ(i)
+            node.scale = SCNVector3(layout.discScale, layout.discScale, 1)
+            node.position.z = layout.diskX(i) - layout.stackCenterX
             node.renderingOrder = 5
             turbineSpinNode.addChildNode(node)
         }
 
-        // Coaxial Shafts (Low-Pressure & High-Pressure Shafts)
-        let outerShaftCyl = SCNCylinder(radius: CGFloat(cfg.hubRadius * 1.3), height: 2.2)
-        outerShaftCyl.firstMaterial = metal(alpha: 1, white: 0.35)
-        let outerShaftNode = SCNNode(geometry: outerShaftCyl)
-        outerShaftNode.eulerAngles.x = .pi / 2
-        outerShaftNode.position = SCNVector3(0, 0, 0.2)
-        engineRoot.addChildNode(outerShaftNode)
+        // Main shaft through the drum, discs and tail cone
+        let shaftLen = layout.xStackEnd + 0.1 - layout.xNose
+        let shaft = SCNCylinder(radius: CGFloat(layout.hubRadius * 0.8), height: CGFloat(shaftLen))
+        shaft.firstMaterial = metal(alpha: 1, white: 0.35)
+        let shaftNode = SCNNode(geometry: shaft)
+        shaftNode.eulerAngles.z = .pi / 2
+        shaftNode.position = SCNVector3(layout.xNose + shaftLen / 2, 0, 0)
+        engineRoot.addChildNode(shaftNode)
+    }
 
-        let innerShaftCyl = SCNCylinder(radius: CGFloat(cfg.hubRadius * 0.6), height: 2.6)
-        innerShaftCyl.firstMaterial = metal(alpha: 1, white: 0.5)
-        let innerShaftNode = SCNNode(geometry: innerShaftCyl)
-        innerShaftNode.eulerAngles.x = .pi / 2
-        innerShaftNode.position = SCNVector3(0, 0, 0.2)
-        engineRoot.addChildNode(innerShaftNode)
-
-        // Exhaust Shroud & Nozzle
-        let exhaustShroud = SCNCone(topRadius: 0.32, bottomRadius: 0.18, height: 0.9)
-        exhaustShroud.firstMaterial = metal(alpha: 0.4, white: 0.6)
-        let exhaustNode = SCNNode(geometry: exhaustShroud)
-        exhaustNode.eulerAngles.x = -.pi / 2
-        exhaustNode.position = SCNVector3(0, 0, -1.35)
-        engineRoot.addChildNode(exhaustNode)
-
-        let exhaustCone = SCNCone(topRadius: 0.16, bottomRadius: 0.0, height: 0.7)
-        exhaustCone.firstMaterial = metal(alpha: 1, white: 0.5)
-        let exhaustConeNode = SCNNode(geometry: exhaustCone)
-        exhaustConeNode.eulerAngles.x = .pi / 2
-        exhaustConeNode.position = SCNVector3(0, 0, -1.3)
-        engineRoot.addChildNode(exhaustConeNode)
+    private func buildLabels() {
+        func label(_ text: String, x: Float, y: Float, color: UIColor, size: CGFloat = 0.3) {
+            let t = SCNText(string: text, extrusionDepth: 0)
+            t.font = UIFont.systemFont(ofSize: size, weight: .bold)
+            t.flatness = 0.05
+            let m = SCNMaterial()
+            m.lightingModel = .constant
+            m.diffuse.contents = color
+            t.firstMaterial = m
+            let n = SCNNode(geometry: t)
+            let (mn, mx) = n.boundingBox
+            n.pivot = SCNMatrix4MakeTranslation((mn.x + mx.x) / 2, mn.y, 0)
+            n.position = SCNVector3(x, y, 0)
+            engineRoot.addChildNode(n)
+        }
+        let top: Float = 0.95
+        label("INTAKE", x: (layout.xAirStart + layout.xCompStart) / 2, y: top, color: .systemBlue)
+        label("COMPRESSION", x: (layout.xCompStart + layout.xCompEnd) / 2, y: top, color: .systemCyan)
+        label("COMBUSTION", x: (layout.xCompEnd + layout.xCombEnd) / 2, y: top, color: .systemYellow)
+        label("TESLA TURBINE", x: layout.stackCenterX + 0.2, y: top + 0.15, color: .systemOrange)
+        label("EXHAUST", x: (layout.xStackEnd + layout.xExhaustEnd) / 2, y: top, color: .systemPink)
+        label("COLD SECTION", x: (layout.xAirStart + layout.xCompEnd) / 2, y: -1.05, color: .systemBlue, size: 0.24)
+        label("HOT SECTION", x: (layout.xCompEnd + layout.xExhaustEnd) / 2, y: -1.05, color: .systemRed, size: 0.24)
     }
 
     private func buildParticles() {
@@ -265,7 +311,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             holder.addChildNode(n)
             particleNodes.append(n)
         }
-        scene.rootNode.addChildNode(holder)
+        engineRoot.addChildNode(holder)
     }
 
     static func diskGeometry(_ cfg: TurbineConfig, withHoles: Bool) -> SCNShape {
@@ -302,6 +348,39 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         return shape
     }
 
+    private func updateTerrain() {
+        let p = SIMD2<Float>(flight.position.x, flight.position.z)
+        if simd_distance(p, terrainCenter) > 1800 {
+            terrainCenter = p
+            terrainNode.geometry = Terrain.mesh(centerX: p.x, centerZ: p.y)
+        }
+    }
+
+    private func updateCamera(dt: Float) {
+        let f = flight.forward, pos = flight.position
+        let worldUp = SIMD3<Float>(0, 1, 0)
+        let target: SIMD3<Float>
+        let look: SIMD3<Float>
+        if sideCamera {
+            // Side view of the engine: flow runs left → right.
+            var side = simd_cross(f, worldUp)
+            if simd_length(side) < 0.05 { side = SIMD3(0, 0, 1) }
+            side = simd_normalize(side)
+            target = pos + side * 11 + worldUp * 1.2 - f * 0.4
+            look = pos - f * 0.4
+        } else {
+            target = pos - f * 15 + worldUp * 4.5
+            look = pos + f * 8
+        }
+        let k = 1 - exp(-8 * dt)
+        cameraPosition = (cameraPosition == .zero) ? target : cameraPosition + (target - cameraPosition) * k
+        // Keep the camera out of the ground too.
+        let minY = Terrain.height(cameraPosition.x, cameraPosition.z) + 3
+        cameraPosition.y = max(cameraPosition.y, minY)
+        cameraNode.simdPosition = cameraPosition
+        cameraNode.look(at: SCNVector3(look.x, look.y, look.z))
+    }
+
     private func band(for temp: Float) -> Int8 {
         temp > 1200 ? 0 : temp > 900 ? 1 : temp > 600 ? 2 : 3
     }
@@ -310,6 +389,15 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         if lastTime == 0 { lastTime = time }
         let frame = min(Float(time - lastTime), 0.1)
         lastTime = time
+
+        // Flight: engine thrust (from the cycle) drives speed; altitude and speed feed back into the cycle.
+        sim.altitude = flight.altitude
+        sim.airspeed = flight.speed
+        flight.step(dt: frame, thrust: sim.thrust)
+        flightNode.simdPosition = flight.position
+        flightNode.simdOrientation = flight.orientation
+        updateTerrain()
+        updateCamera(dt: frame)
 
         accumulator += frame
         let tickDt = 1 / cfg.tickRate
@@ -320,9 +408,9 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         let alpha = accumulator / tickDt
 
         let angle = sim.diskAngle + sim.omega * accumulator
-        turbineSpinNode.eulerAngles.z = angle
-        compressorSpinNode.eulerAngles.z = angle * 1.15 // High-spool differential RPM scaling
-        fanSpinNode.eulerAngles.z = angle * 0.85
+        turbineSpinNode.eulerAngles.z = angle     // disc node: local Z is the engine axis
+        compressorSpinNode.eulerAngles.x = angle
+        fanSpinNode.eulerAngles.x = angle
 
         combustorMaterial.emission.intensity = CGFloat(max(0, min(1, (sim.flameTemp - 300) / 1500)))
 
@@ -346,8 +434,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             }
         }
 
-        engineRoot.eulerAngles = SCNVector3(pitch, yaw, roll)
-
         hudTimer += frame
         if hudTimer > 0.12 {
             hudTimer = 0
@@ -357,6 +443,12 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             let flame = sim.flameTemp, flow = sim.fuelFlowGramsPerSec, used = sim.fuelUsedGrams
             let thrust = sim.thrust, tq = sim.turbineTorque, ld = sim.compressorLoad
             let starter = sim.starterOn
+            let cyc = sim.cycle
+            let measured = sim.measuredFlow
+            let fs = flight
+            let fAlt = fs.altitude, fClr = fs.clearance, fSpd = fs.speed, fMach = fs.mach
+            let fHdg = fs.heading, fPit = fs.pitchAngle * 180 / .pi, fBank = fs.bank * 180 / .pi, fGCAS = fs.groundAvoid
+            let net = cyc.turbineTorque - cyc.compressorTorque - cyc.frictionTorque
             let vExit = sim.exhaustVelocity, mdot = sim.exhaustMassFlow
             let opr = sim.overallPressureRatio, sfc = sim.tsfc, counts = sim.stageCounts
             DispatchQueue.main.async {
@@ -377,8 +469,18 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 self.turbineTorque = tq
                 self.compressorLoad = ld
                 self.starterOn = starter
+                self.cycle = cyc
+                self.measuredFlow = measured
+                self.flightAltitude = fAlt
+                self.flightClearance = fClr
+                self.flightSpeed = fSpd
+                self.flightMach = fMach
+                self.flightHeading = fHdg
+                self.flightPitch = fPit
+                self.flightBank = fBank
+                self.groundAvoid = fGCAS
+                self.netTorque = net
             }
         }
     }
 }
-

@@ -36,13 +36,25 @@ struct TurbineConfig {
     var burnerPressureLoss: Float = 0.05
     var turbineEfficiency: Float = 0.60        // Tesla disc stage (lower than a bladed turbine)
     var lowerHeatingValue: Float = 43.0e6      // J/kg, jet fuel
-    var maxFuelAirRatio: Float = 0.035         // fuel-air ratio at full fuel command
+    var maxFuelAirRatio: Float = 0.026         // fuel-air ratio at full fuel command
     var nozzleExitArea: Float = 0.46           // m²
+    var hotThroatArea: Float = 0.15            // m², choked Tesla-inlet throat: sets ṁ = A·p₀₃/√T₀₃·√(γ/R)·(2/(γ+1))^((γ+1)/(2(γ−1)))
+    var inletRecovery: Float = 0.97            // total-pressure recovery of the F-16 chin inlet
+    var tracerMass: Float = 0.4                // kg of gas each CA tracer represents
     var spoolInertia: Float = 25               // kg·m²
     var starterPhysicalTorque: Float = 3000    // N·m
     var frictionFraction: Float = 0.02         // friction torque / design compressor torque
-    var idleFuelFraction: Float = 0.22         // fuel command at the lowest throttle detent above cutoff
+    var idleFuelFraction: Float = 0.45         // fuel command at the lowest throttle detent above cutoff
     var governorBand: Float = 0.06             // overspeed governor trims fuel over this band above 100 %
+    // MARK: Aircraft (F-16 class)
+    var aircraftMass: Float = 12_000           // kg
+    var wingArea: Float = 27.9                 // m²
+    var zeroLiftDrag: Float = 0.021
+    var inducedDragFactor: Float = 0.12
+    var stallSpeed: Float = 75                 // m/s
+    var maxRollRate: Float = 3.2               // rad/s
+    var maxPitchRate: Float = 0.7              // rad/s
+    var maxYawRate: Float = 0.25               // rad/s
     var lpcPressureRatioDefault: Float = 2.0
     var designOverallPR: Float { lpcPressureRatioDefault * defaultPressureRatio }
 
