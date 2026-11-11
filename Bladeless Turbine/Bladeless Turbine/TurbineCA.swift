@@ -155,10 +155,10 @@ final class TurbineCA {
                         density: cfg.outletPressure / (cfg.gasConstant * cfg.ambientTemperature),
                         pressure: cfg.outletPressure,
                         temperature: cfg.ambientTemperature,
-                        radialVelocity: 0,
+                        radialVelocity: -15.0, // Default initial inward ingestion vector
                         tangentialVelocity: 0,
                         axialVelocity: 0,
-                        totalSpecificEnergy: specificEnergy(temperature: cfg.ambientTemperature, ur: 0, ut: 0, uy: 0)
+                        totalSpecificEnergy: specificEnergy(temperature: cfg.ambientTemperature, ur: -15.0, ut: 0, uy: 0)
                     )
                 }
             }
@@ -224,7 +224,7 @@ final class TurbineCA {
         let T01 = T_amb * (1.0 + 0.5 * (gamma - 1.0) * flightMach * flightMach)
 
         // Inlet face velocity proportional to fan spool speed
-        let V1 = max(5.0, cfg.designIntakeMach * a_amb * shaftFraction)
+        let V1 = max(10.0, cfg.designIntakeMach * a_amb * shaftFraction)
         let rho1 = P01 / (R * T01)
         airMassFlow = rho1 * ductArea * V1 // m_dot = rho * A * V
 
@@ -239,7 +239,7 @@ final class TurbineCA {
         let P03 = P01 * totalPR
         let T03 = T01 * (1.0 + (pow(totalPR, (gamma - 1.0) / gamma) - 1.0) / cfg.compressorEfficiency)
 
-        // Compressor Mechanical Load (Power / Shaft Speed = Torque)
+        // Compressor Mechanical Load
         let compressorPower = airMassFlow * Cp_air * (T03 - T01)
         compressorLoad = compressorPower / max(0.1, omega)
         lpcLoad = (airMassFlow * Cp_air * (T02 - T01)) / max(0.1, omega)
@@ -252,7 +252,6 @@ final class TurbineCA {
         let pi_b: Float = 1.0 - cfg.burnerPressureLoss
         let P04 = P03 * pi_b
 
-        // Enthalpy balance: T04 = (m_air * Cp_a * T03 + m_fuel * eta_b * LHV) / ((m_air + m_fuel) * Cp_g)
         let energyInAir = airMassFlow * Cp_air * T03
         let energyInFuel = mdot_fuel * cfg.combustionEfficiency * cfg.lowerHeatingValue
         let mdot_exhaust = airMassFlow + mdot_fuel
@@ -267,7 +266,6 @@ final class TurbineCA {
         let mu = dynamicViscosity(T04)
         let shearRate = (2.0 * mu) / max(1.0e-6, cfg.effectiveFlowGap)
 
-        // Integration across disk gap surfaces
         for _ in 0..<cfg.gapCount {
             let relativeWallVelocity = max(0.0, (cfg.maxTangentialSpeed * (T04 / T01).squareRoot()) - (omega * cfg.diskRadius))
             let gapTorque = 2.0 * shearRate * relativeWallVelocity * diskArea * (0.5 * (cfg.diskRadius + cfg.innerRingRadius))
@@ -295,9 +293,8 @@ final class TurbineCA {
         let Ve = (2.0 * Cp_gas * T08 * max(0.0, isentropicExpansion)).squareRoot()
         exhaustVelocity = Ve
 
-        let Pe = P_amb // Assuming fully expanded unchoked nozzle
+        let Pe = P_amb
         let Ae = cfg.nozzleExitArea
-        // F_N = (m_air + m_fuel) * Ve - m_air * V0 + (Pe - P_ambient) * Ae
         let momentumThrust = (mdot_exhaust * Ve) - (airMassFlow * V0)
         let pressureThrust = (Pe - P_amb) * Ae
         thrust = max(0.0, momentumThrust + pressureThrust)
@@ -356,6 +353,10 @@ final class TurbineCA {
         let outletP = stations[8].kPa * 1000.0
         let deltaP = max(0, inletP - outletP)
 
+        // Calculate face intake velocity directly from air mass flow
+        let a_amb = (cfg.gamma * cfg.gasConstant * cfg.ambientTemperature).squareRoot()
+        let V1 = max(15.0, cfg.designIntakeMach * a_amb * shaftFraction)
+
         let oldFlow = flow
         nextFlow = oldFlow
 
@@ -390,10 +391,18 @@ final class TurbineCA {
                     c.tangentialVelocity += (wallSpeed - c.tangentialVelocity) * relaxation
                     c.tangentialVelocity = min(cfg.maxTangentialSpeed, max(-cfg.maxTangentialSpeed, c.tangentialVelocity))
 
+                    let axialMobility = h * h / (12 * mu)
+                    let gapAxialGradient = -cfg.axialPressureDrop / max(1.0e-4, Float(max(1, cfg.gapCount - 1)) * cfg.pitch)
+                    let axial = -axialMobility * gapAxialGradient
+                    c.axialVelocity = isHole(ring: r, sector: t) ? min(2.0, max(0, axial)) : 0
+
                     c.pressure = targetPressure
                     c.density = rho
+
+                    // RESTORE INTAKE BOUNDARY VECTOR AT OUTER FACE
                     if r == cfg.ringCount - 1 {
-                        c.temperature = stations[3].tempK
+                        c.radialVelocity = -V1 // Ingestion vector from intake face
+                        c.temperature = stations[0].tempK
                         c.pressure = gapInletPressure
                         c.density = c.pressure / (cfg.gasConstant * c.temperature)
                     } else if r == 0 {
@@ -435,7 +444,7 @@ final class TurbineCA {
                 temp: stations[0].tempK,
                 yOffset: (rng.unit() - 0.5) * 0.35,
                 exhaustAge: -1,
-                radialRemainder: 0.5
+                radialRemainder: 0.8
             )
         }
         _ = dt
@@ -462,18 +471,22 @@ final class TurbineCA {
         let radius = max(0.05, ringRadius(p.r))
         occupancy[oldK] = occupancy[oldK] > 0 ? occupancy[oldK] - 1 : 0
 
-        p.radialRemainder += max(0, -cell.radialVelocity) * dt / max(1.0e-5, cfg.ringWidth)
+        // Continuous ingestion flow advection
+        let radialSpeed = max(12.0, abs(cell.radialVelocity))
+        p.radialRemainder += radialSpeed * dt / max(1.0e-5, cfg.ringWidth)
         p.angularRemainder += cell.tangentialVelocity * dt / max(1.0e-5, radius * cfg.sectorAngle)
         p.axialRemainder += max(0, cell.axialVelocity) * dt / max(1.0e-5, cfg.pitch)
 
         var newR = p.r
         var newT = p.t
         var newG = p.g
+
         if p.radialRemainder >= 1 {
             let steps = min(p.r, Int(p.radialRemainder))
             newR -= steps
             p.radialRemainder -= Float(steps)
         }
+
         if abs(p.angularRemainder) >= 1 {
             let steps = Int(p.angularRemainder)
             newT = wrapSector(newT + steps)
