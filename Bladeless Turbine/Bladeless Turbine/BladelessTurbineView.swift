@@ -1,8 +1,3 @@
-//
-//  BladelessTurbineView.swift
-//  Bladeless Turbine
-//
-
 import SwiftUI
 import SceneKit
 
@@ -25,7 +20,7 @@ struct TurbineSceneView: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {}
 }
 
-/// Compact station strip: one chip per station, laid out in a single row.
+/// Compact station strip with vertical pressure bar charts.
 struct PressureOverlay: View {
     let stations: [PressureStation]
     let ambient: Float
@@ -42,9 +37,26 @@ struct PressureOverlay: View {
     }
 
     var body: some View {
-        HStack(spacing: 4) {
+        let maxKPa = stations.map { $0.kPa }.max() ?? 200_000
+
+        return HStack(spacing: 4) {
             ForEach(stations) { s in
-                VStack(spacing: 1) {
+                VStack(spacing: 2) {
+                    // Vertical pressure bar indicator
+                    ZStack(alignment: .bottom) {
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(Color.white.opacity(0.1))
+                            .frame(width: 8, height: 36)
+
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(colour(s.kPa))
+                            .frame(
+                                width: 8,
+                                height: max(4, CGFloat(min(1.0, s.kPa / maxKPa)) * 36)
+                            )
+                    }
+                    .padding(.bottom, 2)
+
                     Text("\(s.id + 1) \(s.id < Self.shortNames.count ? Self.shortNames[s.id] : "")")
                         .foregroundStyle(.secondary)
                     Text(String(format: "%.0f kPa", s.kPa))
@@ -57,7 +69,7 @@ struct PressureOverlay: View {
             }
         }
         .font(.system(size: 8.5, design: .monospaced))
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
         .padding(.horizontal, 6)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
     }
@@ -73,7 +85,6 @@ struct BladelessTurbineView: View {
             TurbineSceneView(controller: controller)
                 .ignoresSafeArea()
 
-            // Overlays hug the top and bottom edges; the middle of the screen stays clear.
             VStack(spacing: 0) {
                 topBar
                 Spacer(minLength: 0)
@@ -90,23 +101,19 @@ struct BladelessTurbineView: View {
         }
     }
 
-    // MARK: Top: pressures + telemetry
-
     private var topBar: some View {
         let c = controller.cycle
         return VStack(spacing: 4) {
             PressureOverlay(stations: controller.stations, ambient: controller.cfg.ambientPressure)
+
+            // Streamlined key indicators row
             HStack(spacing: 10) {
+                metric("FUEL RATE", String(format: "%.0f g/s", controller.fuelFlow))
                 metric("SHAFT", String(format: "%.0f rpm", controller.rpm))
-                metric("N", String(format: "%.0f%%", controller.shaftPercent))
-                metric("T3", String(format: "%.0f K", controller.flameTemp))
-                metric("FUEL", String(format: "%.0f g/s", controller.fuelFlow))
-                metric("ṁ AIR", String(format: "%.1f kg/s", c.intakeAirFlow))
+                metric("THROTTLE", String(format: "%.0f%%", fuel * 100))
+                metric("AIR INTAKE", String(format: "%.1f kg/s", c.intakeAirFlow))
                 metric("THRUST", String(format: "%.1f kN", controller.thrust / 1000))
-                metric("OPR", String(format: "%.1f×", controller.pressureRatio))
-                if controller.starterOn {
-                    Text("STARTER").font(.system(size: 9, weight: .bold)).foregroundStyle(.orange)
-                }
+                metric("MASS FLOW", String(format: "%.1f kg/s", controller.massFlow))
             }
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
@@ -115,10 +122,8 @@ struct BladelessTurbineView: View {
 
             HStack(spacing: 10) {
                 metric("ALT", String(format: "%.0f m", controller.flightAltitude))
-                metric("AGL", String(format: "%.0f m", controller.flightClearance))
                 metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed))
                 metric("MACH", String(format: "%.2f", controller.flightMach))
-                metric("HDG", String(format: "%.0f°", controller.flightHeading))
                 metric("PITCH", String(format: "%+.0f°", controller.flightPitch))
                 metric("BANK", String(format: "%+.0f°", controller.flightBank))
                 if controller.groundAvoid {
@@ -131,24 +136,12 @@ struct BladelessTurbineView: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
             HStack(alignment: .top, spacing: 6) {
-                eqCard("MASS FLOW  ṁ = A·p₀₃/√T₀₃·F(γ)", [
-                    String(format: "air %.1f kg/s  fan M %.2f", c.intakeAirFlow, c.intakeMach),
+                eqCard("MASS FLOW", [
                     String(format: "f %.4f  ṁe %.1f  CA %.1f kg/s", c.fuelAirRatio, c.exhaustFlow, controller.measuredFlow)
                 ])
-                eqCard("TORQUE  τ = P / Ω", [
-                    String(format: "τt %.0f − τc %.0f − τf %.0f", c.turbineTorque, c.compressorTorque, c.frictionTorque),
-                    String(format: "net %+.0f N·m   πc %.1f  πt %.1f", controller.netTorque, c.compressorPR, c.turbinePR)
-                ])
-                eqCard("FORCE  F = ṁVe + (pe−p0)A", [
-                    String(format: "%.1f + %.1f = %.1f kN", c.momentumThrust / 1000, c.pressureThrust / 1000, c.thrust / 1000),
-                    String(format: "Ve %.0f m/s  Me %.2f %@", c.exhaustVelocity, c.nozzleExitMach, c.choked ? "choked" : "")
-                ])
             }
-
         }
     }
-
-    // MARK: Bottom: equations + controls
 
     private var bottomBar: some View {
         VStack(spacing: 4) {
@@ -171,22 +164,31 @@ struct BladelessTurbineView: View {
 
     private func metric(_ label: String, _ value: String) -> some View {
         VStack(spacing: 0) {
-            Text(label).font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 10, weight: .semibold, design: .monospaced))
+            Text(label).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 11, weight: .semibold, design: .monospaced))
         }
         .frame(maxWidth: .infinity)
     }
 
     private func eqCard(_ title: String, _ lines: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title).font(.system(size: 8, weight: .bold, design: .monospaced)).foregroundStyle(.cyan)
-            ForEach(lines, id: \.self) { Text($0).font(.system(size: 8.5, design: .monospaced)) }
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundStyle(.cyan)
+            
+            ForEach(lines, id: \.self) { line in
+                Text(line)
+                    .font(.system(size: 10.5, design: .monospaced))
+            }
         }
         .lineLimit(1)
         .minimumScaleFactor(0.6)
-        .padding(5)
+        .padding(6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .background(
+            .ultraThinMaterial,
+            in: RoundedRectangle(cornerRadius: 8)
+        )
     }
 }
 
@@ -230,3 +232,4 @@ struct JoystickView: View {
 }
 
 #Preview { BladelessTurbineView() }
+

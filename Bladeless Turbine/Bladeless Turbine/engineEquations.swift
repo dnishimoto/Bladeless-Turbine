@@ -121,100 +121,107 @@ struct EngineEquations {
 
     // MARK: Solve the cycle at a shaft speed, fuel command and flight condition
 
-    func solve(speedRatio: Float, fuelCommand: Float, overallPR: Float,
-               altitude: Float = 0, airspeed: Float = 0) -> CycleResult {
-        var out = CycleResult()
-        let s = Double(max(0.02, speedRatio))
-        let pr = Double(max(1, overallPR))
-        out.speedRatio = Float(s)
+    // MARK: Solve the cycle at a shaft speed, fuel command and flight condition
 
-        // Ambient and ram recovery
-        let (t0, p0) = Self.atmosphere(altitude: Double(altitude))
-        let a0 = (g * r * t0).squareRoot()
-        let v0 = Double(max(0, airspeed))
-        let m0 = v0 / a0
-        let ram = 1 + 0.5 * (g - 1) * m0 * m0
-        let t1 = t0 * ram
-        let p1 = p0 * pow(ram, g / (g - 1)) * Double(cfg.inletRecovery)
+        func solve(speedRatio: Float, fuelCommand: Float, overallPR: Float,
+                   altitude: Float = 0, airspeed: Float = 0) -> CycleResult {
+            var out = CycleResult()
+            let s = Double(max(0.02, speedRatio))
+            let pr = Double(max(1, overallPR))
+            out.speedRatio = Float(s)
 
-        // Compressor (corrected speed)
-        let sc = s * (288.15 / t1).squareRoot()
-        let pic = 1 + (pr - 1) * sc * sc
-        let t2 = t1 * (1 + (pow(pic, k) - 1) / Double(cfg.compressorEfficiency))
-        let p2 = pic * p1
-        let omega = s * Double(cfg.physicalDesignOmega)
+            // Ambient and ram recovery
+            let (t0, p0) = Self.atmosphere(altitude: Double(altitude))
+            let a0 = (g * r * t0).squareRoot()
+            let v0 = Double(max(0, airspeed))
+            let m0 = v0 / a0
+            let ram = 1 + 0.5 * (g - 1) * m0 * m0
+            let t1 = t0 * ram
+            let p1 = p0 * pow(ram, g / (g - 1)) * Double(cfg.inletRecovery)
 
-        // Combustor energy balance
-        let f = Double(max(0, min(1, fuelCommand))) * Double(cfg.maxFuelAirRatio)
-        let p3 = p2 * (1 - Double(cfg.burnerPressureLoss))
-        let t3 = (t2 + Double(cfg.burnerEfficiency) * f * Double(cfg.lowerHeatingValue) / cp) / (1 + f)
+            // Compressor (corrected speed)
+            let sc = s * (288.15 / t1).squareRoot()
+            let pic = 1 + (pr - 1) * sc * sc
+            let t2 = t1 * (1 + (pow(pic, k) - 1) / Double(cfg.compressorEfficiency))
+            let p2 = pic * p1
+            let omega = s * Double(cfg.physicalDesignOmega)
 
-        // Mass flow: choked Tesla inlet throat
-        let me = Double(cfg.hotThroatArea) * p3 / t3.squareRoot() * chokedFlowFunction()
-        let ma = me / (1 + f)
-        let wc = ma * cp * (t2 - t1)
+            // Combustor energy balance
+            let f = Double(max(0, min(1, fuelCommand))) * Double(cfg.maxFuelAirRatio)
+            let p3 = p2 * (1 - Double(cfg.burnerPressureLoss))
+            let t3 = (t2 + Double(cfg.burnerEfficiency) * f * Double(cfg.lowerHeatingValue) / cp) / (1 + f)
 
-        // Turbine expansion ratio from exit-nozzle continuity (bisection)
-        var lo = 1.0001, hi = max(1.0002, p3 / p0)
-        let etaT = Double(cfg.turbineEfficiency)
-        for _ in 0..<40 {
-            let mid = 0.5 * (lo + hi)
-            let t05 = t3 * (1 - etaT * (1 - pow(mid, -k)))
-            if nozzleFlow(p05: p3 / mid, t05: t05, p0: p0) > me { lo = mid } else { hi = mid }
+            // Mass flow: choked Tesla inlet throat
+            let me = Double(cfg.hotThroatArea) * p3 / t3.squareRoot() * chokedFlowFunction()
+            let ma = me / (1 + f)
+            let wc = ma * cp * (t2 - t1)
+
+            // Turbine expansion ratio from exit-nozzle continuity (bisection)
+            var lo = 1.0001, hi = max(1.0002, p3 / p0)
+            let etaT = Double(cfg.turbineEfficiency)
+            for _ in 0..<40 {
+                let mid = 0.5 * (lo + hi)
+                let t05 = t3 * (1 - etaT * (1 - pow(mid, -k)))
+                if nozzleFlow(p05: p3 / mid, t05: t05, p0: p0) > me { lo = mid } else { hi = mid }
+            }
+            let pit = 0.5 * (lo + hi)
+            let t5 = t3 * (1 - etaT * (1 - pow(pit, -k)))
+            let p5 = p3 / pit
+            let wt = me * cp * (t3 - t5)
+
+            // Nozzle exit and net force (updated with mass flow continuity)
+            let critical = pow((g + 1) / 2, g / (g - 1))
+            let choked = p5 / p0 >= critical
+            var te: Double, pe: Double, ve: Double, mExit: Double
+            let aE = Double(cfg.nozzleExitArea)
+
+            if choked {
+                te = 2 * t5 / (g + 1)
+                pe = p5 / critical
+                ve = (g * r * te).squareRoot()
+                mExit = 1
+            } else {
+                pe = p0
+                let idealVe = (2 * cp * t5 * max(0, 1 - pow(p0 / max(p0, p5), k))).squareRoot()
+                let tentativeTe = t5 - idealVe * idealVe / (2 * cp)
+                let rhoE = pe / (r * max(180, tentativeTe))
+                
+                ve = me / max(1.0e-5, rhoE * aE)
+                te = t5 - ve * ve / (2 * cp)
+                mExit = ve / (g * r * max(1, te)).squareRoot()
+            }
+            let momentum = me * ve - ma * v0
+            let pressure = (pe - p0) * aE
+
+            // Derived fan-face Mach from continuity
+            let rho01 = p1 / (r * t1), a01 = (g * r * t1).squareRoot()
+
+            out.ambientT = Float(t0); out.ambientP = Float(p0)
+            out.flightMach = Float(m0)
+            out.ramDrag = Float(ma * v0)
+            out.intakeAirFlow = Float(ma)
+            out.intakeMach = Float(ma / (rho01 * intakeArea * a01))
+            out.fuelAirRatio = Float(f)
+            out.fuelFlow = Float(ma * f)
+            out.exhaustFlow = Float(me)
+            out.t1 = Float(t1); out.p1 = Float(p1)
+            out.compressorPR = Float(pic)
+            out.t2 = Float(t2); out.p2 = Float(p2)
+            out.t3 = Float(t3); out.p3 = Float(p3)
+            out.turbinePR = Float(pit)
+            out.t5 = Float(t5); out.p5 = Float(p5)
+            out.te = Float(te); out.pe = Float(pe)
+            out.compressorPower = Float(wc)
+            out.turbinePower = Float(wt)
+            out.compressorTorque = Float(wc / omega)
+            out.turbineTorque = Float(wt / omega)
+            out.frictionTorque = Float(frictionAtDesign * s * s)
+            out.exhaustVelocity = Float(ve)
+            out.nozzleExitMach = Float(mExit)
+            out.momentumThrust = Float(momentum)
+            out.pressureThrust = Float(pressure)
+            out.thrust = Float(momentum + pressure)
+            out.choked = choked
+            return out
         }
-        let pit = 0.5 * (lo + hi)
-        let t5 = t3 * (1 - etaT * (1 - pow(pit, -k)))
-        let p5 = p3 / pit
-        let wt = me * cp * (t3 - t5)
-
-        // Nozzle exit and net force
-        let critical = pow((g + 1) / 2, g / (g - 1))
-        let choked = p5 / p0 >= critical
-        var te: Double, pe: Double, ve: Double, mExit: Double
-        if choked {
-            te = 2 * t5 / (g + 1)
-            pe = p5 / critical
-            ve = (g * r * te).squareRoot()
-            mExit = 1
-        } else {
-            pe = p0
-            ve = (2 * cp * t5 * max(0, 1 - pow(p0 / max(p0, p5), k))).squareRoot()
-            te = t5 - ve * ve / (2 * cp)
-            mExit = ve / (g * r * max(1, te)).squareRoot()
-        }
-        let aE = Double(cfg.nozzleExitArea)
-        let momentum = me * ve - ma * v0
-        let pressure = (pe - p0) * aE
-
-        // Derived fan-face Mach from continuity
-        let rho01 = p1 / (r * t1), a01 = (g * r * t1).squareRoot()
-
-        out.ambientT = Float(t0); out.ambientP = Float(p0)
-        out.flightMach = Float(m0)
-        out.ramDrag = Float(ma * v0)
-        out.intakeAirFlow = Float(ma)
-        out.intakeMach = Float(ma / (rho01 * intakeArea * a01))
-        out.fuelAirRatio = Float(f)
-        out.fuelFlow = Float(ma * f)
-        out.exhaustFlow = Float(me)
-        out.t1 = Float(t1); out.p1 = Float(p1)
-        out.compressorPR = Float(pic)
-        out.t2 = Float(t2); out.p2 = Float(p2)
-        out.t3 = Float(t3); out.p3 = Float(p3)
-        out.turbinePR = Float(pit)
-        out.t5 = Float(t5); out.p5 = Float(p5)
-        out.te = Float(te); out.pe = Float(pe)
-        out.compressorPower = Float(wc)
-        out.turbinePower = Float(wt)
-        out.compressorTorque = Float(wc / omega)
-        out.turbineTorque = Float(wt / omega)
-        out.frictionTorque = Float(frictionAtDesign * s * s)
-        out.exhaustVelocity = Float(ve)
-        out.nozzleExitMach = Float(mExit)
-        out.momentumThrust = Float(momentum)
-        out.pressureThrust = Float(pressure)
-        out.thrust = Float(momentum + pressure)
-        out.choked = choked
-        return out
-    }
 }
