@@ -29,7 +29,9 @@ enum Terrain {
     ) -> Float {
         a + (b - a) * t
     }
-
+    static func canyonCenterX(z: Float) -> Float {
+           mainCanyonCenter(z)
+       }
     private static func valueNoise(
         _ x: Float,
         _ z: Float
@@ -82,14 +84,77 @@ enum Terrain {
 
     // MARK: - Canyon Geometry
 
+    // The canyon runs along world +X, matching the aircraft's forward axis.
+    // This function returns the canyon's lateral center in world Z.
     private static func mainCanyonCenter(
-        _ z: Float
+        _ x: Float
     ) -> Float {
-
         return
-            900.0 * sin(z * 0.00045) +
-            260.0 * sin(z * 0.0011 + 1.4) +
-            90.0 * sin(z * 0.003)
+            900.0 * sin(x * 0.00045) +
+            260.0 * sin(x * 0.0011 + 1.4) +
+            90.0 * sin(x * 0.003)
+    }
+
+    // MARK: - Flight Corridor and Spline Paths
+
+    static let canyonPathHalfWidth: Float = 220.0
+    static let canyonRecoveryMargin: Float = 35.0
+    static let canyonVariationAmplitude: Float = 125.0
+
+    static func canyonCenterZ(_ x: Float) -> Float {
+        mainCanyonCenter(x)
+    }
+
+    static func canyonCenterPath(_ x: Float) -> SIMD3<Float> {
+        SIMD3<Float>(x, 0, canyonCenterZ(x))
+    }
+
+    static func canyonLeftBoundary(_ x: Float) -> SIMD3<Float> {
+        SIMD3<Float>(x, 0, canyonCenterZ(x) - canyonPathHalfWidth)
+    }
+
+    static func canyonRightBoundary(_ x: Float) -> SIMD3<Float> {
+        SIMD3<Float>(x, 0, canyonCenterZ(x) + canyonPathHalfWidth)
+    }
+
+    static func canyonVariablePath(_ x: Float) -> SIMD3<Float> {
+        let offset =
+            canyonVariationAmplitude * sin(x * 0.0011) +
+            35.0 * sin(x * 0.0027 + 1.2)
+        let limit = canyonPathHalfWidth - canyonRecoveryMargin
+        let safeOffset = max(-limit, min(limit, offset))
+        return SIMD3<Float>(x, 0, canyonCenterZ(x) + safeOffset)
+    }
+
+    static func canyonLateralError(x: Float, z: Float) -> Float {
+        z - canyonCenterZ(x)
+    }
+
+    static func canyonRecoveryStrength(x: Float, z: Float) -> Float {
+        let error = abs(canyonLateralError(x: x, z: z))
+        let limit = canyonPathHalfWidth - canyonRecoveryMargin
+        let warning = limit * 0.45
+        return min(1, max(0, (error - warning) / max(1, limit - warning)))
+    }
+
+    static func canyonFlightTarget(
+        aircraftX: Float,
+        aircraftZ: Float,
+        lookAhead: Float
+    ) -> SIMD3<Float> {
+        let targetX = aircraftX + lookAhead
+        let lateral = canyonLateralError(x: aircraftX, z: aircraftZ)
+        let safeLimit = canyonPathHalfWidth - canyonRecoveryMargin
+
+        // Outside the safe corridor, aim back toward the centerline.
+        // Inside it, allow the flight path to vary left and right.
+        let targetZ: Float
+        if abs(lateral) > safeLimit {
+            targetZ = canyonCenterZ(targetX)
+        } else {
+            targetZ = canyonVariablePath(targetX).z
+        }
+        return SIMD3<Float>(targetX, 0, targetZ)
     }
 
     private static func canyonCut(
@@ -101,7 +166,7 @@ enum Terrain {
         depth: Float
     ) -> Float {
 
-        let distance = abs(x - center)
+        let distance = abs(z - center)
 
         if distance >= wallWidth {
             return 0.0
@@ -122,15 +187,15 @@ enum Terrain {
     // MARK: - Branching Ravines
 
     private static func branchCenter(
-        _ z: Float,
+        _ x: Float,
         phase: Float,
         amplitude: Float,
         frequency: Float
     ) -> Float {
 
         return
-            mainCanyonCenter(z) +
-            amplitude * sin(z * frequency + phase)
+            mainCanyonCenter(x) +
+            amplitude * sin(x * frequency + phase)
     }
 
     private static func branchCut(
@@ -144,13 +209,13 @@ enum Terrain {
     ) -> Float {
 
         let center = branchCenter(
-            z,
+            x,
             phase: phase,
             amplitude: amplitude,
             frequency: frequency
         )
 
-        let distance = abs(x - center)
+        let distance = abs(z - center)
 
         if distance >= width {
             return 0.0
@@ -205,7 +270,7 @@ enum Terrain {
             detail * 7.0
 
         // Main canyon.
-        let mainCenter = mainCanyonCenter(z)
+        let mainCenter = mainCanyonCenter(x)
 
         let mainCut = canyonCut(
             x: x,
@@ -255,7 +320,7 @@ enum Terrain {
         )
 
         // Geological strata along canyon walls.
-        let distanceFromCanyon = abs(x - mainCenter)
+        let distanceFromCanyon = abs(z - mainCenter)
 
         let wallFactor = max(
             0.0,
@@ -553,5 +618,132 @@ enum Terrain {
         return terrainNode
     }
 }
+
+
+
+
+// MARK: - Canyon Spline Visualization
+
+/// Draws the flight corridor over the terrain. Call update at a throttled
+/// interval (about 0.2–0.5 seconds), not on every rendered frame.
+enum CanyonSplineRenderer {
+
+    private static let nodeNames = [
+        "CanyonCenterSpline",
+        "CanyonLeftSpline",
+        "CanyonRightSpline",
+        "CanyonVariableSpline",
+        "CanyonRecoverySpline"
+    ]
+
+    private static func makeLine(
+        name: String,
+        color: UIColor,
+        aircraftX: Float,
+        aircraftZ: Float,
+        path: (Float) -> SIMD3<Float>
+    ) -> SCNNode {
+
+        let sampleCount = 160
+        let startX = aircraftX - 100
+        let endX = aircraftX + 1500
+        var vertices: [SCNVector3] = []
+        vertices.reserveCapacity(sampleCount + 1)
+
+        for index in 0...sampleCount {
+            let t = Float(index) / Float(sampleCount)
+            let x = startX + (endX - startX) * t
+            let point = path(x)
+            let y = Terrain.height(point.x, point.z) + 38.0
+            vertices.append(SCNVector3(point.x, y, point.z))
+        }
+
+        let source = SCNGeometrySource(vertices: vertices)
+        var indices: [Int32] = []
+        indices.reserveCapacity(sampleCount * 2)
+        for index in 0..<sampleCount {
+            indices.append(Int32(index))
+            indices.append(Int32(index + 1))
+        }
+
+        let element = SCNGeometryElement(
+            indices: indices,
+            primitiveType: .line
+        )
+        let geometry = SCNGeometry(sources: [source], elements: [element])
+        let material = SCNMaterial()
+        material.diffuse.contents = color
+        material.emission.contents = color
+        material.lightingModel = .constant
+        material.isDoubleSided = true
+        geometry.materials = [material]
+
+        let node = SCNNode(geometry: geometry)
+        node.name = name
+        node.castsShadow = false
+        node.categoryBitMask = 1 << 5
+        return node
+    }
+
+    static func update(
+        scene: SCNScene,
+        aircraftPosition: SIMD3<Float>
+    ) {
+        for name in nodeNames {
+            scene.rootNode.childNode(withName: name, recursively: false)?.removeFromParentNode()
+        }
+
+        let x = aircraftPosition.x
+        let z = aircraftPosition.z
+        let lateral = Terrain.canyonLateralError(x: x, z: z)
+        let safeLimit = Terrain.canyonPathHalfWidth - Terrain.canyonRecoveryMargin
+        let recovering = abs(lateral) > safeLimit
+
+        let center = makeLine(
+            name: "CanyonCenterSpline", color: .cyan,
+            aircraftX: x, aircraftZ: z,
+            path: Terrain.canyonCenterPath
+        )
+        let left = makeLine(
+            name: "CanyonLeftSpline", color: .orange,
+            aircraftX: x, aircraftZ: z,
+            path: Terrain.canyonLeftBoundary
+        )
+        let right = makeLine(
+            name: "CanyonRightSpline", color: .orange,
+            aircraftX: x, aircraftZ: z,
+            path: Terrain.canyonRightBoundary
+        )
+        let variable = makeLine(
+            name: "CanyonVariableSpline", color: .yellow,
+            aircraftX: x, aircraftZ: z,
+            path: Terrain.canyonVariablePath
+        )
+        let recovery = makeLine(
+            name: "CanyonRecoverySpline", color: .green,
+            aircraftX: x, aircraftZ: z,
+            path: { sampleX in
+                let centerZ = Terrain.canyonCenterZ(sampleX)
+                if recovering {
+                    return SIMD3<Float>(sampleX, 0, centerZ)
+                }
+                let desired = Terrain.canyonVariablePath(sampleX).z
+                let clamped = max(
+                    centerZ - safeLimit,
+                    min(centerZ + safeLimit, desired)
+                )
+                return SIMD3<Float>(sampleX, 0, clamped)
+            }
+        )
+
+        scene.rootNode.addChildNode(center)
+        scene.rootNode.addChildNode(left)
+        scene.rootNode.addChildNode(right)
+        scene.rootNode.addChildNode(variable)
+        scene.rootNode.addChildNode(recovery)
+    }
+}
+
+
 
 

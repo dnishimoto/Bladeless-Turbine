@@ -9,6 +9,66 @@ import Foundation
 import SwiftUI
 import SceneKit
 
+struct AircraftLocalRotationStack {
+
+    private(set) var rotations: [simd_quatf] = []
+
+    private let localForward = SIMD3<Float>(1, 0, 0)
+    private let localUp = SIMD3<Float>(0, 1, 0)
+    private let localRight = SIMD3<Float>(0, 0, 1)
+
+    mutating func clear() {
+        rotations.removeAll(keepingCapacity: true)
+    }
+
+    mutating func pushRoll(_ angle: Float) {
+        guard abs(angle) > 0.000001 else { return }
+
+        rotations.append(
+            simd_quatf(
+                angle: angle,
+                axis: localForward
+            )
+        )
+    }
+
+    mutating func pushYaw(_ angle: Float) {
+        guard abs(angle) > 0.000001 else { return }
+
+        rotations.append(
+            simd_quatf(
+                angle: angle,
+                axis: localUp
+            )
+        )
+    }
+
+    mutating func pushPitch(_ angle: Float) {
+        guard abs(angle) > 0.000001 else { return }
+
+        rotations.append(
+            simd_quatf(
+                angle: angle,
+                axis: localRight
+            )
+        )
+    }
+
+    var combined: simd_quatf {
+
+        var result = simd_quatf(
+            angle: 0,
+            axis: localUp
+        )
+
+        for rotation in rotations {
+            result = result * rotation
+        }
+
+        return simd_normalize(result)
+    }
+}
+
 
 struct TurbineConfig {
     
@@ -25,7 +85,7 @@ struct TurbineConfig {
     
     // Design airflow used to scale the tracer particles (F100-PW-229 class: 112 kg/s)
     var referenceMassFlow: Float = 112
-
+ 
     // MARK: Cycle equations (see EngineEquations.swift) — SI units
     var intakeTipRadius: Float = 0.44          // m, F100 inlet is 88 cm in diameter
     var intakeHubRadius: Float = 0.14          // m
@@ -51,34 +111,35 @@ struct TurbineConfig {
     var wingArea: Float = 27.9                 // m²
     var zeroLiftDrag: Float = 0.021
     var inducedDragFactor: Float = 0.12
+    var terrainSpeedScale: Float = 4           // ground-track visual scale: terrain streams past at Mach × a × scale
     var stallSpeed: Float = 75                 // m/s
     var maxRollRate: Float = 3.2               // rad/s
     var maxPitchRate: Float = 0.7              // rad/s
     var maxYawRate: Float = 0.25               // rad/s
     var lpcPressureRatioDefault: Float = 2.0
     var designOverallPR: Float { lpcPressureRatioDefault * defaultPressureRatio }
-
+ 
     // MARK: Rotor Geometry
-
+ 
     var diskCount: Int = 9
     var diskRadius: Float = 1.0
     var hubRadius: Float = 0.12
     var pitch: Float = 0.09
     var diskThickness: Float = 0.012
-
+ 
     // MARK: Cellular Automaton Mesh
-
+ 
     var ringCount: Int = 20
     var sectorCount: Int = 48
     var innerRingRadius: Float = 0.24
-
+ 
     // MARK: Exhaust Openings
-
+ 
     var holeCount: Int = 3
     var holeInnerRadius: Float = 0.24
     var holeOuterRadius: Float = 0.52
     var holeHalfAngle: Float = 24 * Float.pi / 180
-
+ 
     // MARK: Gas Particle Rendering
     var cellCapacity: UInt8 = 6              // Increased cell packing capacity for denser flow
     var maxParticles: Int = 4000             // Increased gas particles
@@ -88,15 +149,15 @@ struct TurbineConfig {
     var exhaustLife: Int = 24
     
     // MARK: Air Properties
-
+ 
     var gasConstant: Float = 287.05
     var gamma: Float = 1.4
-
+ 
     var inletTemperature: Float = 950
     var ambientTemperature: Float = 288.15
-
+ 
     // MARK: Fuel & Combustion
-
+ 
     var fuelGasPerTick: Float = 5.0
     var maxFlameTemp: Float = 1800
     var maxFuelFlowGramsPerSec: Float = 60
@@ -104,12 +165,12 @@ struct TurbineConfig {
     var combustionEfficiency: Float = 0.98
   
     // MARK: Flow Physics
-
+ 
     var effectiveFlowGap: Float = 0.0008
     var thermalDiffusivity: Float = 2.2e-5
    
     // MARK: Rotor Mechanics
-
+ 
     var rotorInertia: Float = 0.08
     var rotorDrag: Float = 0.08
     var diskFriction: Float = 0.08
@@ -127,15 +188,15 @@ struct TurbineConfig {
     }
  
     // MARK: Derived Mesh Values
-
+ 
     var gapCount: Int {
         max(1, diskCount - 1)
     }
-
+ 
     var sectorAngle: Float {
         2 * Float.pi / Float(max(1, sectorCount))
     }
-
+ 
     var ringWidth: Float {
         (diskRadius - innerRingRadius) /
         Float(max(1, ringCount))
