@@ -88,14 +88,26 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     func startEngine() { sim.startEngine() }
     func setStick(roll: Float, pitch: Float) { flight.stickRoll = roll; flight.stickPitch = pitch }
     func setRudder(_ v: Float) { flight.rudder = v }
+    /// Render-thread copy of the camera mode, set synchronously by the button so the renderer
+    /// never depends on when SwiftUI delivers the @Published change.
+    private let cameraModeLock = NSLock()
+    private var orbitModeFlag = false
+    private var orbitModeValue: Bool {
+        cameraModeLock.lock(); defer { cameraModeLock.unlock() }
+        return orbitModeFlag
+    }
+
     func toggleCamera() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.sideCamera.toggle()
-            self.orbitT = 0
-            self.orbitYawOffset = 0
-            self.orbitHeightOffset = 0
-        }
+        sideCamera.toggle()
+        cameraModeLock.lock()
+        orbitModeFlag.toggle()
+        let on = orbitModeFlag
+        orbitT = 0
+        orbitYawOffset = 0
+        orbitHeightOffset = 0
+        cameraModeLock.unlock()
+        if Thread.isMainThread { sideCamera = on }
+        else { DispatchQueue.main.async { [weak self] in self?.sideCamera = on } }
     }
 
     func reset() {
@@ -509,7 +521,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
     /// Drag on the scene (orbit mode): horizontal swings around the engine, vertical raises/lowers.
     func orbitDrag(dx: Float, dy: Float) {
-        guard sideCamera else { return }
+        guard orbitModeValue else { return }
         orbitYawOffset += dx * 0.012
         orbitHeightOffset = max(-1.2, min(1.8, orbitHeightOffset - dy * 0.01))
     }
@@ -535,90 +547,30 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     }
 
     private func updateCamera(dt: Float) {
+         let f = flight.forward, pos = flight.position
+         let worldUp = SIMD3<Float>(0, 1, 0)
+         let target: SIMD3<Float>
+         let look: SIMD3<Float>
+         if sideCamera {
+             // Side view of the engine: flow runs left → right.
+             var side = simd_cross(f, worldUp)
+             if simd_length(side) < 0.05 { side = SIMD3(0, 0, 1) }
+             side = simd_normalize(side)
+             target = pos + side * 11 + worldUp * 1.2 - f * 0.4
+             look = pos - f * 0.4
+         } else {
+             target = pos - f * 15 + worldUp * 4.5
+             look = pos + f * 8
+         }
+         let k = 1 - exp(-8 * dt)
+         cameraPosition = (cameraPosition == .zero) ? target : cameraPosition + (target - cameraPosition) * k
+         // Keep the camera out of the ground too.
+         let minY = Terrain.height(cameraPosition.x, cameraPosition.z) + 3
+         cameraPosition.y = max(cameraPosition.y, minY)
+         cameraNode.simdPosition = cameraPosition
+         cameraNode.look(at: SCNVector3(look.x, look.y, look.z))
+     }
 
-        let pos = flight.position
-        let q = flight.orientation
-        let worldUp = SIMD3<Float>(0, 1, 0)
-
-        cameraNode.camera?.projectionDirection = .vertical
-        cameraNode.camera?.fieldOfView = sideCamera ? 60 : 50
-
-        if sideCamera {
-
-            // MARK: - Engine Centre (jet-local, computed directly from the flight state)
-
-            // engineRoot is scaled by its own scale and yawed 180°, so engine-local x maps to
-            // jet-local −x · scale.
-            let engineMidX = (layout.xNose + layout.xExhaustEnd) * 0.5
-            let engineCentreLocal = SIMD3<Float>(-engineMidX * Float(engineRoot.scale.x), 0, 0)
-            let engineCenter = pos + q.act(engineCentreLocal)
-
-            // MARK: - Orbit Path (one lap every 30 s, rotates with the jet)
-
-            orbitT += max(0, dt) / Self.orbitLapSeconds
-            orbitT -= floor(orbitT)
-
-            // Analytic closed ring (same shape as orbitPoints, no spline evaluation needed).
-            let a = orbitT * 2 * .pi + orbitYawOffset
-            let ringOffset = SIMD3<Float>(
-                Self.orbitRadiusAlong * cos(a),
-                0.35 + 0.5 * sin(2 * a) + orbitHeightOffset,
-                Self.orbitRadiusSide * sin(a)
-            )
-            var camPos = engineCenter + q.act(ringOffset)
-            if !(camPos.x.isFinite && camPos.y.isFinite && camPos.z.isFinite) {
-                camPos = engineCenter + q.act(SIMD3<Float>(Self.orbitRadiusAlong, 0.35, 0))
-            }
-
-            // Look at the engine centre; up follows the jet so the view banks with it.
-            let focus = engineCenter
-            let cameraUp = q.act(SIMD3<Float>(0, 1, 0))
-
-            // Build the camera pose by hand: camera looks down its local −Z, so the basis is
-            // (right, up, −forward). This avoids any look(at:) / localFront ambiguity.
-            var toFocus = focus - camPos
-            if simd_length(toFocus) < 0.001 { toFocus = SIMD3<Float>(1, 0, 0) }
-            let f = simd_normalize(toFocus)
-            var r = simd_cross(f, cameraUp)
-            if simd_length(r) < 0.001 { r = q.act(SIMD3<Float>(0, 0, 1)) }
-            r = simd_normalize(r)
-            let u = simd_cross(r, f)
-
-            let pct = Int(orbitT * 100)
-            if pct != orbitPercent { DispatchQueue.main.async { self.orbitPercent = pct } }
-
-            cameraPosition = camPos
-            cameraNode.simdPosition = camPos
-            cameraNode.simdOrientation = simd_quatf(simd_float3x3(columns: (r, u, -f)))
-
-            return
-        }
-
-        // MARK: - Chase Camera
-
-        let forward = q.act(SIMD3<Float>(1, 0, 0))
-        let target = pos - forward * 15 + worldUp * 4.5
-        let look = pos + forward * 3
-
-        let k = 1 - exp(-8 * dt)
-
-        cameraPosition = cameraPosition == .zero
-            ? target
-            : cameraPosition + (target - cameraPosition) * k
-
-        let minY = Terrain.height(
-            cameraPosition.x,
-            cameraPosition.z
-        ) + 3
-
-        cameraPosition.y = max(cameraPosition.y, minY)
-
-        cameraNode.simdPosition = cameraPosition
-
-        cameraNode.look(
-            at: SCNVector3(look.x, look.y, look.z)
-        )
-    }
 
     private func band(for temp: Float) -> Int8 {
         temp > 1200 ? 0 : temp > 900 ? 1 : temp > 600 ? 2 : 3
@@ -667,21 +619,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             cycle: sim.cycle
         )
 
-        // MARK: - Shared Aircraft Orientation
-
-        // FlightSim is the single authority for aircraft rotation.
-        // Its orientation contains the combined local roll, yaw, and pitch.
-        let aircraftRotation = flight.orientation
-
         // MARK: - Engine / Aircraft Transform
 
-        // The engine is a child of flightNode.
-        // It inherits the aircraft's position and orientation.
+        // The engine is a child of flightNode and inherits its position and orientation.
         flightNode.simdPosition = flight.position
-        flightNode.simdOrientation = aircraftRotation
-
-        // engineRoot retains its local engine-axis correction:
-        // engineRoot.eulerAngles.y = .pi
+        flightNode.simdOrientation = flight.orientation
 
         // MARK: - Terrain and Flight Path
 
@@ -690,10 +632,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
         // MARK: - Camera
 
-        // Camera uses the exact same aircraft rotation as the engine.
-        updateCamera(
-            dt: frame
-        )
+        updateCamera(dt: frame)
 
         // MARK: - Rotor Animation
 
@@ -718,28 +657,19 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             let node = particleNodes[i]
 
             if !p.active {
-                if !node.isHidden {
-                    node.isHidden = true
-                }
+                if !node.isHidden { node.isHidden = true }
                 continue
             }
 
             node.isHidden = false
 
             let q = sim.renderPosition(of: p, alpha: alpha)
-
-            node.position = SCNVector3(
-                q.x,
-                q.y,
-                q.z
-            )
+            node.position = SCNVector3(q.x, q.y, q.z)
 
             let s = sim.visualScale(of: p)
-
             node.scale = SCNVector3(s, s, s)
 
             let b = band(for: p.temp)
-
             if b != lastBand[i] {
                 node.geometry = bandGeometries[Int(b)]
                 lastBand[i] = b

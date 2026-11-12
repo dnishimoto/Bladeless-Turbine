@@ -472,13 +472,16 @@ final class FlightSim {
         // edge + 40 m, leave once back inside 60 % of the safe corridor.
         let lateral = abs(Terrain.canyonLateralError(x: position.x, z: position.z))
         let safeEdge = Terrain.canyonPathHalfWidth - Terrain.canyonRecoveryMargin
-        if lateral > Terrain.canyonPathHalfWidth + 40 { canyonReturnActive = true }
-        else if lateral < safeEdge * 0.6 { canyonReturnActive = false }
+        if lateral > safeEdge + 20 { canyonReturnActive = true }
+        else if lateral < safeEdge * 0.5 { canyonReturnActive = false }
 
         var goalBank: Float = 0
         var goalPitch: Float = 0.1
         if canyonReturnActive {
-            goalBank = max(-1.1, min(1.1, canyonGuidanceBankTarget()))
+            // Steer hard toward the guide path: amplified guidance bank, never shallower than 0.5 rad
+            // while the guidance asks for any turn at all.
+            let g = canyonGuidanceBankTarget() * 1.8
+            goalBank = abs(g) > 0.1 ? max(-1.15, min(1.15, g.sign == .minus ? min(g, -0.5) : max(g, 0.5))) : g
             if clearanceAhead < 300 { goalPitch = 0.25 }       // altitude: climb while low
         }
         recoveryCA.rebuildCosts(terrainRisk: risk, goalBank: goalBank, goalPitch: goalPitch)
@@ -742,10 +745,16 @@ final class FlightSim {
             min(1.3, predictedBank)
         )
 
+        // At Mach speeds g·tanφ/V is only ~0.03 rad/s, far too slow to get back into a canyon
+        // 200 m wide. While the CA is flying the canyon return the jet pulls a hard, high-G turn
+        // (4× the level-turn rate), so it actually changes heading in seconds.
+        let turnBoost: Float = canyonReturnActive ? 4 : 1
+
         let coordinatedTurnRate = max(
             -0.6,
             min(
                 0.6,
+                turnBoost *
                 gravity *
                 tan(clampedBank) /
                 max(60, speed)
