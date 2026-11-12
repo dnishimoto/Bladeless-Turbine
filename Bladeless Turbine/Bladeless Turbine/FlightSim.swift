@@ -1,4 +1,3 @@
-
 //
 //  FlightSim.swift
 //  Bladeless Turbine
@@ -50,6 +49,13 @@ final class FlightSim {
     private(set) var equilibriumSpeed: Float = 0
 
     private(set) var turbulenceLevel: Float = 0
+
+    /// Cellular-automaton attitude recovery (takes over when control is lost).
+    let recoveryCA = AttitudeRecoveryCA()
+    private(set) var recoveryActive = false
+    /// True while the CA is flying the jet back into the canyon (far off the guide splines).
+    private(set) var canyonReturnActive = false
+    private var recoveryLevelTime: Float = 0
 
     private var flightTime: Float = 0
 
@@ -194,6 +200,9 @@ final class FlightSim {
         rudder = 0
 
         groundAvoid = false
+        recoveryActive = false
+        canyonReturnActive = false
+        recoveryCA.reset()
 
         clearance = 700
         drag = 0
@@ -415,6 +424,75 @@ final class FlightSim {
 
     // MARK: - Projected Clearance
 
+    /// Full-range roll about the nose (−π…π, + = right wing down) and nose elevation.
+    private func attitudeAngles() -> (roll: Float, pitch: Float) {
+        let f = forward
+        let pitch = asin(max(-1, min(1, f.y)))
+        let horizontal = (f.x * f.x + f.z * f.z).squareRoot()
+        guard horizontal > 0.02 else { return (0, pitch) }
+        let levelRight = simd_normalize(simd_cross(f, worldUp))
+        let levelUp = simd_cross(levelRight, f)
+        let r = right
+        return (atan2(-simd_dot(r, levelUp), simd_dot(r, levelRight)), pitch)
+    }
+
+    private func wrapAngle(_ a: Float) -> Float {
+        var x = a
+        while x > .pi { x -= 2 * .pi }
+        while x < -.pi { x += 2 * .pi }
+        return x
+    }
+
+    /// Decides whether control has been lost and, if so, drives roll/pitch from the CA field.
+    /// Returns (rollCommand, pitchCommand) in −1…1, or nil when the pilot is in control.
+    private func recoveryCommands(dt: Float) -> (roll: Float, pitch: Float)? {
+        let (roll, pitch) = attitudeAngles()
+        let clearanceAhead = projectedClearance()
+        let diving = pitch < -0.5 && clearanceAhead < 250
+        let risk = max(0, min(1, 1 - clearanceAhead / 400))
+
+        // Canyon return: far outside the guide splines the CA's goal moves from "level" to
+        // "banked toward the canyon axis, climbing if low". Hysteresis: enter beyond the canyon
+        // edge + 40 m, leave once back inside 60 % of the safe corridor.
+        let lateral = abs(Terrain.canyonLateralError(x: position.x, z: position.z))
+        let safeEdge = Terrain.canyonPathHalfWidth - Terrain.canyonRecoveryMargin
+        if lateral > Terrain.canyonPathHalfWidth + 40 { canyonReturnActive = true }
+        else if lateral < safeEdge * 0.6 { canyonReturnActive = false }
+
+        var goalBank: Float = 0
+        var goalPitch: Float = 0.1
+        if canyonReturnActive {
+            goalBank = max(-1.1, min(1.1, canyonGuidanceBankTarget()))
+            if clearanceAhead < 300 { goalPitch = 0.25 }       // altitude: climb while low
+        }
+        recoveryCA.rebuildCosts(terrainRisk: risk, goalBank: goalBank, goalPitch: goalPitch)
+        recoveryCA.sweep(count: 3)
+
+        let lost = abs(roll) > Self.bankLimit * 0.95 || abs(pitch) > Self.pitchLimit * 0.95
+            || up.y < 0.15 || diving
+        if lost { recoveryActive = true; recoveryLevelTime = 0 }
+
+        if canyonReturnActive && !recoveryActive {
+            let t = recoveryCA.target(roll: roll, pitch: pitch)
+            return (max(-1, min(1, wrapAngle(t.roll - roll) * 4)),
+                    max(-1, min(1, (t.pitch - pitch) * 4)))
+        }
+
+        guard recoveryActive else { return nil }
+
+        if abs(roll) < 0.2 && pitch > -0.1 && pitch < 0.35 && !diving {
+            recoveryLevelTime += dt
+            if recoveryLevelTime > 0.5 { recoveryActive = false; return nil }
+        } else {
+            recoveryLevelTime = 0
+        }
+
+        let target = recoveryCA.target(roll: roll, pitch: pitch)
+        let rollCmd = max(-1, min(1, wrapAngle(target.roll - roll) * 4))
+        let pitchCmd = max(-1, min(1, (target.pitch - pitch) * 4))
+        return (rollCmd, pitchCmd)
+    }
+
     private func projectedClearance() -> Float {
 
         var lowest = Float.greatestFiniteMagnitude
@@ -590,7 +668,10 @@ final class FlightSim {
 
         let rollError = bankTarget - bank
 
-        let rollCommand = max(
+        // When control is lost, the attitude-recovery CA replaces the pilot and the guide splines.
+        let recovery = recoveryCommands(dt: dt)
+
+        let rollCommand = recovery?.roll ?? max(
             -1,
             min(1, rollError * Self.rollResponse)
         )
@@ -614,8 +695,8 @@ final class FlightSim {
 
         // MARK: - 3. PITCH
 
-        let pitchInput: Float =
-            abs(stickPitch) > 0.01 ? stickPitch : 0
+        let pitchInput: Float = recovery?.pitch ??
+            (abs(stickPitch) > 0.01 ? stickPitch : 0)
 
         let pitchAngle =
             pitchInput * cfg.maxPitchRate * dt
@@ -821,4 +902,3 @@ final class FlightSim {
         )
     }
 }
-

@@ -40,6 +40,9 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var flightPitch: Float = 0
     @Published var flightBank: Float = 0
     @Published var groundAvoid = false
+    @Published var recoveryActive = false
+    @Published var canyonReturn = false
+    @Published var orbitPercent: Int = 0
     /// true: camera sits close to the left of the engine (whole engine in view); false: chase view.
     @Published var sideCamera = false
 
@@ -85,7 +88,13 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     func startEngine() { sim.startEngine() }
     func setStick(roll: Float, pitch: Float) { flight.stickRoll = roll; flight.stickPitch = pitch }
     func setRudder(_ v: Float) { flight.rudder = v }
-    func toggleCamera() { sideCamera.toggle() }
+    func toggleCamera() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.sideCamera.toggle()
+            self.orbitT = 0
+        }
+    }
 
     func reset() {
         sim.reset()
@@ -120,7 +129,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         scene.rootNode.addChildNode(flightNode)
         
         let cam = SCNCamera()
-        cam.zNear = 0.3
+        cam.zNear = 0.1
         cam.zFar = 22000
         cam.fieldOfView = 50
         cameraNode.camera = cam
@@ -473,18 +482,26 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 
-    /// Closed camera spline around the engine, in jet-local metres (x forward, y up, z right).
-    private static let orbitPoints: [SIMD3<Float>] = [
-        SIMD3( 0.4, 0.3, -3.6),   // left, mid-engine
-        SIMD3( 2.6, 0.9, -2.8),   // left, at the intake
-        SIMD3( 4.0, 0.5, -0.6),   // in front of the intake
-        SIMD3( 3.0, 1.7,  2.2),   // front right, above
-        SIMD3( 0.4, 0.7,  3.6),   // right, mid-engine
-        SIMD3(-2.2, 0.4,  2.9),   // right, at the Tesla discs / nozzle
-        SIMD3(-3.8, 0.9,  0.4),   // behind the exhaust
-        SIMD3(-2.5, 1.8, -2.3)    // left rear, above
-    ]
+    /// Closed camera spline around the engine, in metres relative to the engine centre
+    /// (jet-local axes: x forward, y up, z right). A tilted ellipse ring: long axis along the
+    /// engine, with a gentle rise and fall so the camera sweeps above and below the casing.
+    private static let orbitPoints: [SIMD3<Float>] = {
+        let count = 12
+        let radiusAlong: Float = 4.2      // ahead of the intake / behind the nozzle
+        let radiusSide: Float = 2.6       // beside the casing
+        return (0..<count).map { i -> SIMD3<Float> in
+            let a = Float(i) / Float(count) * 2 * .pi
+            return SIMD3<Float>(
+                radiusAlong * cos(a),
+                0.5 + 0.9 * sin(2 * a),
+                radiusSide * sin(a)
+            )
+        }
+    }()
     private var orbitT: Float = 0
+    /// Orbit ring radii around the engine centre, metres (smaller = closer).
+    private static let orbitRadiusAlong: Float = 3.0
+    private static let orbitRadiusSide: Float = 1.6
     /// Scales the orbit spline toward the engine (1 = original, smaller = closer).
     private static let orbitCloseness: Float = 0.6
 
@@ -514,65 +531,51 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
         if sideCamera {
 
-            // MARK: - Actual Engine Center
+            // MARK: - Engine Centre (jet-local, computed directly from the flight state)
 
-            // Find the midpoint of the engine in engine-local coordinates.
+            // engineRoot is scaled by its own scale and yawed 180°, so engine-local x maps to
+            // jet-local −x · scale.
             let engineMidX = (layout.xNose + layout.xExhaustEnd) * 0.5
+            let engineCentreLocal = SIMD3<Float>(-engineMidX * Float(engineRoot.scale.x), 0, 0)
+            let engineCenter = pos + q.act(engineCentreLocal)
 
-            // Convert through engineRoot, including its scale and 180-degree rotation.
-            let engineCenterSCN = engineRoot.convertPosition(
-                SCNVector3(engineMidX, 0, 0),
-                to: scene.rootNode
-            )
+            // MARK: - Orbit Path (one lap every 30 s, rotates with the jet)
 
-            let engineCenter = SIMD3<Float>(
-                engineCenterSCN.x,
-                engineCenterSCN.y,
-                engineCenterSCN.z
-            )
-
-            // MARK: - Orbit Path
-
-            // One complete orbit every 30 seconds.
             orbitT += max(0, dt) / 30
+            orbitT -= floor(orbitT)
 
-            // The orbit points are aircraft-local offsets.
-            let localOrbit = catmullRom(
-                Self.orbitPoints,
-                orbitT
+            // Analytic closed ring (same shape as orbitPoints, no spline evaluation needed).
+            let a = orbitT * 2 * .pi
+            let ringOffset = SIMD3<Float>(
+                Self.orbitRadiusAlong * cos(a),
+                0.35 + 0.5 * sin(2 * a),
+                Self.orbitRadiusSide * sin(a)
             )
+            var camPos = engineCenter + q.act(ringOffset)
+            if !(camPos.x.isFinite && camPos.y.isFinite && camPos.z.isFinite) {
+                camPos = engineCenter + q.act(SIMD3<Float>(Self.orbitRadiusAlong, 0.35, 0))
+            }
 
-            // Keep sufficient distance to see the entire engine.
-            let orbitDistance: Float = 1.15
-
-            // Rotate the orbit with the aircraft.
-            let worldOffset = q.act(localOrbit * orbitDistance)
-
-            // Camera revolves around the actual engine center.
-            let camPos = engineCenter + worldOffset
-
-            // Keep the camera focused on the engine center.
+            // Look at the engine centre; up follows the jet so the view banks with it.
             let focus = engineCenter
+            let cameraUp = q.act(SIMD3<Float>(0, 1, 0))
 
-            // Aircraft-relative up vector keeps the view aligned during banking.
-            let cameraUp = q.act(worldUp)
+            // Build the camera pose by hand: camera looks down its local −Z, so the basis is
+            // (right, up, −forward). This avoids any look(at:) / localFront ambiguity.
+            var toFocus = focus - camPos
+            if simd_length(toFocus) < 0.001 { toFocus = SIMD3<Float>(1, 0, 0) }
+            let f = simd_normalize(toFocus)
+            var r = simd_cross(f, cameraUp)
+            if simd_length(r) < 0.001 { r = q.act(SIMD3<Float>(0, 0, 1)) }
+            r = simd_normalize(r)
+            let u = simd_cross(r, f)
+
+            let pct = Int(orbitT * 100)
+            if pct != orbitPercent { DispatchQueue.main.async { self.orbitPercent = pct } }
 
             cameraPosition = camPos
             cameraNode.simdPosition = camPos
-
-            cameraNode.look(
-                at: SCNVector3(
-                    focus.x,
-                    focus.y,
-                    focus.z
-                ),
-                up: SCNVector3(
-                    cameraUp.x,
-                    cameraUp.y,
-                    cameraUp.z
-                ),
-                localFront: SCNVector3(0, 0, -1)
-            )
+            cameraNode.simdOrientation = simd_quatf(simd_float3x3(columns: (r, u, -f)))
 
             return
         }
@@ -766,6 +769,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             let fPit = fs.pitchAngle * 180 / .pi
             let fBank = fs.bank * 180 / .pi
             let fGCAS = fs.groundAvoid
+            let fRecovery = fs.recoveryActive
+            let fCanyon = fs.canyonReturnActive
 
             let net = cyc.turbineTorque
                 - cyc.compressorTorque
@@ -818,6 +823,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 self.flightBank = fBank
 
                 self.groundAvoid = fGCAS
+                self.recoveryActive = fRecovery
+                self.canyonReturn = fCanyon
                 self.netTorque = net
             }
         }
