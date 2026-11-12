@@ -56,6 +56,8 @@ final class FlightSim {
     /// True while the CA is flying the jet back into the canyon (far off the guide splines).
     private(set) var canyonReturnActive = false
     private var recoveryLevelTime: Float = 0
+    /// Seconds the CA stays out after the pilot lets go of the stick.
+    private var pilotHoldoff: Float = 0
 
     private var flightTime: Float = 0
 
@@ -202,6 +204,7 @@ final class FlightSim {
         groundAvoid = false
         recoveryActive = false
         canyonReturnActive = false
+        pilotHoldoff = 0
         recoveryCA.reset()
 
         clearance = 700
@@ -446,6 +449,19 @@ final class FlightSim {
     /// Decides whether control has been lost and, if so, drives roll/pitch from the CA field.
     /// Returns (rollCommand, pitchCommand) in −1…1, or nil when the pilot is in control.
     private func recoveryCommands(dt: Float) -> (roll: Float, pitch: Float)? {
+        // Touching the stick hands control to the pilot immediately; the CA waits 1.5 s after release.
+        if abs(stickRoll) > 0.05 || abs(stickPitch) > 0.05 {
+            recoveryActive = false
+            canyonReturnActive = false
+            recoveryLevelTime = 0
+            pilotHoldoff = 1.5
+            return nil
+        }
+        if pilotHoldoff > 0 {
+            pilotHoldoff -= dt
+            return nil
+        }
+
         let (roll, pitch) = attitudeAngles()
         let clearanceAhead = projectedClearance()
         let diving = pitch < -0.5 && clearanceAhead < 250
