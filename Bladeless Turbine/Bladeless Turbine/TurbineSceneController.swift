@@ -10,7 +10,8 @@ import UIKit
 import simd
 
 final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, ObservableObject {
-
+    private let wingNode = SCNNode()
+    private let wingMaterial = SCNMaterial()
     @Published var stations: [PressureStation] = []
     @Published var rpm: Float = 0
     @Published var shaftPercent: Float = 0
@@ -113,6 +114,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         scene.fogStartDistance = 7000
         scene.fogEndDistance = 15000
 
+        flightNode.simdPosition = flight.position
+        flightNode.simdOrientation = flight.orientation
+
+        scene.rootNode.addChildNode(flightNode)
+        
         let cam = SCNCamera()
         cam.zNear = 0.3
         cam.zFar = 22000
@@ -143,6 +149,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         buildJetEngineBody()
         buildLabels()
         buildParticles()
+        buildTransparentWings()
     }
 
     // MARK: Geometry helpers (engine axis = +X)
@@ -496,42 +503,73 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         return sum * 0.5
     }
 
-    private func updateCamera(
-        dt: Float,
-        aircraftRotation: simd_quatf
-    ) {
+    private func updateCamera(dt: Float) {
+
         let pos = flight.position
+        let q = flight.orientation
+        let worldUp = SIMD3<Float>(0, 1, 0)
 
         cameraNode.camera?.projectionDirection = .vertical
         cameraNode.camera?.fieldOfView = sideCamera ? 60 : 50
 
-        let localUp = SIMD3<Float>(0, 1, 0)
-        let rotatedUp = aircraftRotation.act(localUp)
-
         if sideCamera {
-            // Orbit around the engine in aircraft-local coordinates.
-            orbitT += dt / 30
 
-            let localOffset =
-                catmullRom(Self.orbitPoints, orbitT) *
-                Self.orbitCloseness
+            // MARK: - Actual Engine Center
 
-            let camPos = pos + aircraftRotation.act(localOffset)
+            // Find the midpoint of the engine in engine-local coordinates.
+            let engineMidX = (layout.xNose + layout.xExhaustEnd) * 0.5
 
-            let focusX = max(-1.8, min(2.2, localOffset.x * 0.6)) + 0.4
-            let focus = pos + aircraftRotation.act(
-                SIMD3<Float>(focusX, 0, 0)
+            // Convert through engineRoot, including its scale and 180-degree rotation.
+            let engineCenterSCN = engineRoot.convertPosition(
+                SCNVector3(engineMidX, 0, 0),
+                to: scene.rootNode
             )
+
+            let engineCenter = SIMD3<Float>(
+                engineCenterSCN.x,
+                engineCenterSCN.y,
+                engineCenterSCN.z
+            )
+
+            // MARK: - Orbit Path
+
+            // One complete orbit every 30 seconds.
+            orbitT += max(0, dt) / 30
+
+            // The orbit points are aircraft-local offsets.
+            let localOrbit = catmullRom(
+                Self.orbitPoints,
+                orbitT
+            )
+
+            // Keep sufficient distance to see the entire engine.
+            let orbitDistance: Float = 1.15
+
+            // Rotate the orbit with the aircraft.
+            let worldOffset = q.act(localOrbit * orbitDistance)
+
+            // Camera revolves around the actual engine center.
+            let camPos = engineCenter + worldOffset
+
+            // Keep the camera focused on the engine center.
+            let focus = engineCenter
+
+            // Aircraft-relative up vector keeps the view aligned during banking.
+            let cameraUp = q.act(worldUp)
 
             cameraPosition = camPos
             cameraNode.simdPosition = camPos
 
             cameraNode.look(
-                at: SCNVector3(focus.x, focus.y, focus.z),
+                at: SCNVector3(
+                    focus.x,
+                    focus.y,
+                    focus.z
+                ),
                 up: SCNVector3(
-                    rotatedUp.x,
-                    rotatedUp.y,
-                    rotatedUp.z
+                    cameraUp.x,
+                    cameraUp.y,
+                    cameraUp.z
                 ),
                 localFront: SCNVector3(0, 0, -1)
             )
@@ -539,31 +577,29 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             return
         }
 
-        // Chase camera offset is defined in aircraft-local coordinates.
-        // Local -X is behind the aircraft; local +Y is above it.
-        let localCameraOffset = SIMD3<Float>(-30, 3, 0)
+        // MARK: - Chase Camera
 
-        // Rotate the camera offset with the aircraft's complete rotation.
-        let worldOffset = aircraftRotation.act(localCameraOffset)
-        let target = pos + worldOffset
+        let forward = q.act(SIMD3<Float>(1, 0, 0))
+        let target = pos - forward * 15 + worldUp * 4.5
+        let look = pos + forward * 3
 
-        // Look forward along the aircraft's local +X axis.
-        let look = pos + aircraftRotation.act(
-            SIMD3<Float>(3, 0, 0)
-        )
+        let k = 1 - exp(-8 * dt)
 
-        // Camera follows the aircraft's roll, pitch, and yaw.
-        cameraPosition = target
-        cameraNode.simdPosition = target
+        cameraPosition = cameraPosition == .zero
+            ? target
+            : cameraPosition + (target - cameraPosition) * k
+
+        let minY = Terrain.height(
+            cameraPosition.x,
+            cameraPosition.z
+        ) + 3
+
+        cameraPosition.y = max(cameraPosition.y, minY)
+
+        cameraNode.simdPosition = cameraPosition
 
         cameraNode.look(
-            at: SCNVector3(look.x, look.y, look.z),
-            up: SCNVector3(
-                rotatedUp.x,
-                rotatedUp.y,
-                rotatedUp.z
-            ),
-            localFront: SCNVector3(0, 0, -1)
+            at: SCNVector3(look.x, look.y, look.z)
         )
     }
 
@@ -639,8 +675,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
         // Camera uses the exact same aircraft rotation as the engine.
         updateCamera(
-            dt: frame,
-            aircraftRotation: aircraftRotation
+            dt: frame
         )
 
         // MARK: - Rotor Animation
@@ -786,5 +821,108 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 self.netTorque = net
             }
         }
+    }
+    // MARK: - F-16 Style Transparent Wings
+
+    private func buildTransparentWings() {
+
+        wingNode.name = "F16TransparentWings"
+
+        wingMaterial.lightingModel = .constant
+        wingMaterial.diffuse.contents = UIColor(
+            red: 0.15,
+            green: 0.72,
+            blue: 1.0,
+            alpha: 1.0
+        )
+        wingMaterial.transparency = 0.24
+        wingMaterial.isDoubleSided = true
+        wingMaterial.writesToDepthBuffer = false
+        wingMaterial.readsFromDepthBuffer = true
+
+        let semiSpan: CGFloat = 4.8
+        let rootLeading: CGFloat = 1.4
+        let rootTrailing: CGFloat = -2.5
+        let tipLeading: CGFloat = -0.9
+        let tipTrailing: CGFloat = -1.9
+
+        for side: CGFloat in [-1, 1] {
+
+            let path = UIBezierPath()
+
+            // F-16 swept trapezoidal wing outline.
+            path.move(to: CGPoint(x: rootLeading, y: 0))
+
+            path.addLine(to: CGPoint(
+                x: tipLeading,
+                y: side * semiSpan
+            ))
+
+            path.addLine(to: CGPoint(
+                x: tipTrailing,
+                y: side * semiSpan
+            ))
+
+            path.addLine(to: CGPoint(
+                x: rootTrailing,
+                y: 0
+            ))
+
+            path.close()
+
+            let geometry = SCNShape(
+                path: path,
+                extrusionDepth: 0.035
+            )
+
+            geometry.chamferRadius = 0
+            geometry.firstMaterial = wingMaterial
+
+            let wing = SCNNode(geometry: geometry)
+
+            wing.name = side < 0
+                ? "LeftF16Wing"
+                : "RightF16Wing"
+
+            // Convert the shape's XY plane into aircraft XZ.
+            wing.eulerAngles.x = .pi / 2
+
+            wing.position = SCNVector3(0, 0.22, 0)
+
+            wingNode.addChildNode(wing)
+
+            // Leading-edge highlight.
+            let edge = SCNGeometry(
+                sources: [
+                    SCNGeometrySource(vertices: [
+                        SCNVector3(
+                            Float(rootLeading), 0.025, 0
+                        ),
+                        SCNVector3(
+                            Float(tipLeading), 0.025,
+                            Float(side * semiSpan)
+                        )
+                    ])
+                ],
+                elements: [
+                    SCNGeometryElement(
+                        indices: [0, 1],
+                        primitiveType: .line
+                    )
+                ]
+            )
+
+            let edgeMaterial = SCNMaterial()
+            edgeMaterial.lightingModel = .constant
+            edgeMaterial.diffuse.contents = UIColor.cyan
+            edgeMaterial.emission.contents = UIColor.cyan
+            edgeMaterial.transparency = 0.8
+            edge.materials = [edgeMaterial]
+
+            let edgeNode = SCNNode(geometry: edge)
+            wingNode.addChildNode(edgeNode)
+        }
+
+        flightNode.addChildNode(wingNode)
     }
 }

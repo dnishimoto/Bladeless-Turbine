@@ -1,3 +1,4 @@
+
 //
 //  F16ThrottleView.swift
 //  Bladeless Turbine
@@ -6,6 +7,7 @@
 import SwiftUI
 
 struct F16ThrottleView: View {
+
     @Binding var throttle: Double
 
     private let trackHeight: CGFloat = 140
@@ -34,7 +36,9 @@ struct F16ThrottleView: View {
     }
 
     var body: some View {
+
         VStack(spacing: 6) {
+
             Text("THROTTLE")
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(.yellow)
@@ -43,6 +47,7 @@ struct F16ThrottleView: View {
 
                 // Detent labels
                 VStack(alignment: .trailing, spacing: 22) {
+
                     Text("A/B")
                         .foregroundStyle(.orange)
 
@@ -65,25 +70,37 @@ struct F16ThrottleView: View {
                         .frame(width: 18, height: trackHeight)
                         .overlay {
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.white.opacity(0.3), lineWidth: 1)
+                                .stroke(
+                                    Color.white.opacity(0.3),
+                                    lineWidth: 1
+                                )
                         }
 
                     // Throttle fill
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(
-                            LinearGradient(
-                                colors: [.cyan, .orange, .red],
-                                startPoint: .bottom,
-                                endPoint: .top
+                    VStack {
+                        Spacer(minLength: 0)
+
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.cyan, .orange, .red],
+                                    startPoint: .bottom,
+                                    endPoint: .top
+                                )
                             )
-                        )
-                        .frame(
-                            width: 18,
-                            height: CGFloat(normalizedThrottle) * trackHeight
-                        )
+                            .frame(
+                                width: 18,
+                                height: CGFloat(normalizedThrottle) * trackHeight
+                            )
+                    }
+                    .frame(width: 18, height: trackHeight)
 
                     // Detent marks
-                    ForEach([0.0, 0.35, 0.70, 1.0], id: \.self) { position in
+                    ForEach(
+                        [0.0, 0.35, 0.70, 1.0],
+                        id: \.self
+                    ) { position in
+
                         Rectangle()
                             .fill(Color.white.opacity(0.75))
                             .frame(width: 25, height: 2)
@@ -104,7 +121,10 @@ struct F16ThrottleView: View {
                         .frame(width: 32, height: 20)
                         .overlay {
                             Capsule()
-                                .stroke(Color.white.opacity(0.8), lineWidth: 1.5)
+                                .stroke(
+                                    Color.white.opacity(0.8),
+                                    lineWidth: 1.5
+                                )
                         }
                         .shadow(
                             color: .black.opacity(0.5),
@@ -113,7 +133,8 @@ struct F16ThrottleView: View {
                             y: 2
                         )
                         .offset(
-                            y: -CGFloat(normalizedThrottle) * (trackHeight - 20)
+                            y: -CGFloat(normalizedThrottle) *
+                                (trackHeight - 20)
                         )
                 }
                 .frame(width: 36, height: trackHeight)
@@ -121,6 +142,7 @@ struct F16ThrottleView: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
+
                             let fraction = 1.0 - (
                                 value.location.y / trackHeight
                             )
@@ -132,19 +154,30 @@ struct F16ThrottleView: View {
                         }
                 )
                 .accessibilityLabel("Engine throttle")
-                .accessibilityValue("\(Int(normalizedThrottle * 100)) percent")
+                .accessibilityValue(
+                    "\(Int(normalizedThrottle * 100)) percent"
+                )
 
                 // Throttle readout
                 VStack(alignment: .leading, spacing: 3) {
+
                     Text("\(Int(normalizedThrottle * 100))%")
                         .font(
-                            .system(size: 16, weight: .bold, design: .monospaced)
+                            .system(
+                                size: 16,
+                                weight: .bold,
+                                design: .monospaced
+                            )
                         )
                         .foregroundStyle(throttleColor)
 
                     Text(throttleStatus)
                         .font(
-                            .system(size: 8.5, weight: .bold, design: .monospaced)
+                            .system(
+                                size: 8.5,
+                                weight: .bold,
+                                design: .monospaced
+                            )
                         )
                         .foregroundStyle(throttleColor)
                 }

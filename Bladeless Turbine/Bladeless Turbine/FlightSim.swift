@@ -88,77 +88,19 @@ final class FlightSim {
     private let canyonLookAheadTime: Float = 2.2
     private let canyonMaximumGuidanceBank: Float = 0.48
 
-    // MARK: - Local Rotation Stack
-    //
-    // These are incremental rotations for the current simulation frame.
-    //
-    // The order is:
-    // 1. Roll
-    // 2. Yaw
-    // 3. Pitch
-    //
-    // Each rotation is composed in aircraft-local coordinates.
-
-    private struct LocalRotationStack {
-
-        private let localForward = SIMD3<Float>(1, 0, 0)
-        private let localUp = SIMD3<Float>(0, 1, 0)
-        private let localRight = SIMD3<Float>(0, 0, 1)
-
-        private var rotations: [simd_quatf] = []
-
-        mutating func pushRoll(_ angle: Float) {
-            guard abs(angle) > 0.000001 else { return }
-
-            rotations.append(
-                simd_quatf(
-                    angle: angle,
-                    axis: localForward
-                )
-            )
-        }
-
-        mutating func pushYaw(_ angle: Float) {
-            guard abs(angle) > 0.000001 else { return }
-
-            rotations.append(
-                simd_quatf(
-                    angle: angle,
-                    axis: localUp
-                )
-            )
-        }
-
-        mutating func pushPitch(_ angle: Float) {
-            guard abs(angle) > 0.000001 else { return }
-
-            rotations.append(
-                simd_quatf(
-                    angle: angle,
-                    axis: localRight
-                )
-            )
-        }
-
-        var combined: simd_quatf {
-
-            var result = simd_quatf(
-                angle: 0,
-                axis: localUp
-            )
-
-            for rotation in rotations {
-                result = result * rotation
-            }
-
-            return simd_normalize(result)
-        }
-    }
-
     // MARK: - Initialization
 
     init(config: TurbineConfig) {
-        cfg = config
+        self.cfg = config
+
+        position = SIMD3<Float>(0, 900, 0)
+
+        orientation = simd_quatf(
+            angle: 0,
+            axis: SIMD3<Float>(0, 1, 0)
+        )
+
+        speed = 70
     }
 
     // MARK: - Aircraft Direction Vectors
@@ -366,6 +308,8 @@ final class FlightSim {
     //
     // Keeps the aircraft right side up.
     // Recovers excessive bank, excessive pitch, or inverted attitude.
+    //
+    // This is a safety correction, not a pilot control rotation.
 
     private func enforceUprightLimits(dt: Float) {
 
@@ -620,27 +564,21 @@ final class FlightSim {
         drag = dragForce
         equilibriumSpeed = speed
 
+        // MARK: - Unified Aircraft Local Rotation Stack
+
+        var rotationStack = AircraftLocalRotationStack()
+
         // MARK: - 1. ROLL
 
-        var rotationStack = LocalRotationStack()
-
-        // Positive stick roll requests right bank.
-
         let rollInput: Float =
-            abs(stickRoll) > 0.01
-            ? stickRoll
-            : 0
-
-        // Outside the canyon, guidance takes over more
-        // of the bank command.
+            abs(stickRoll) > 0.01 ? stickRoll : 0
 
         let pilotBankTarget =
             rollInput *
             Self.maxPilotBank *
             (1 - 0.85 * canyonOutsideFactor())
 
-        let canyonBankTarget =
-            canyonGuidanceBankTarget()
+        let canyonBankTarget = canyonGuidanceBankTarget()
 
         let bankTarget = max(
             -Self.maxPilotBank,
@@ -650,78 +588,61 @@ final class FlightSim {
             )
         )
 
-        let rollError =
-            bankTarget - bank
+        let rollError = bankTarget - bank
 
         let rollCommand = max(
             -1,
-            min(
-                1,
-                rollError * Self.rollResponse
-            )
+            min(1, rollError * Self.rollResponse)
         )
 
         let rollAngle =
-            rollCommand *
-            cfg.maxRollRate *
-            dt
+            rollCommand * cfg.maxRollRate * dt
 
         rotationStack.pushRoll(rollAngle)
 
         // MARK: - 2. YAW
 
-        // Rudder right produces a negative rotation
-        // around the aircraft's local +Y axis.
-
         let rudderInput: Float =
-            abs(rudder) > 0.01
-            ? rudder
-            : 0
+            abs(rudder) > 0.01 ? rudder : 0
 
-        let pilotYawAngle =
-            (
-                -rudderInput * cfg.maxYawRate -
-                rollInput * Self.stickYawRate
-            ) * dt
+        let pilotYawAngle = (
+            -rudderInput * cfg.maxYawRate -
+            rollInput * Self.stickYawRate
+        ) * dt
 
         rotationStack.pushYaw(pilotYawAngle)
 
         // MARK: - 3. PITCH
 
-        // Positive pitch raises the nose.
-        // Negative pitch lowers the nose.
-
         let pitchInput: Float =
-            abs(stickPitch) > 0.01
-            ? stickPitch
-            : 0
+            abs(stickPitch) > 0.01 ? stickPitch : 0
 
         let pitchAngle =
-            pitchInput *
-            cfg.maxPitchRate *
-            dt
+            pitchInput * cfg.maxPitchRate * dt
 
         rotationStack.pushPitch(pitchAngle)
 
-        // MARK: - Apply Local Rotation Stack
-        //
-        // Apply roll, yaw, and pitch as one local rotation.
-        // The aircraft's current orientation is the reference frame.
-
-        orientation = simd_normalize(
+        // Predicted orientation after pilot controls.
+        let pilotOrientation = simd_normalize(
             orientation * rotationStack.combined
         )
 
-        // MARK: - Coordinated Turn
-        //
-        // A banked aircraft turns around world vertical.
-        //
-        // Positive bank = right wing down.
-        // Right turn = negative rotation around world +Y.
+        // MARK: - 4. COORDINATED TURN
+
+        // Calculate bank using the predicted aircraft attitude.
+
+        let predictedRight = pilotOrientation.act(localRight)
+
+        let predictedBank = asin(
+            max(
+                -1,
+                min(1, -predictedRight.y)
+            )
+        )
 
         let clampedBank = max(
             -1.3,
-            min(1.3, bank)
+            min(1.3, predictedBank)
         )
 
         let coordinatedTurnRate = max(
@@ -734,14 +655,24 @@ final class FlightSim {
             )
         )
 
-        orientation = simd_normalize(
-            simd_quatf(
-                angle: -coordinatedTurnRate * dt,
-                axis: worldUp
-            ) * orientation
+        // Coordinated turn is physically around world vertical.
+
+        let worldTurn = simd_quatf(
+            angle: -coordinatedTurnRate * dt,
+            axis: worldUp
         )
 
-        // MARK: - Turbulence
+        // Convert the world rotation into aircraft-local coordinates.
+
+        let localWorldTurn = simd_normalize(
+            simd_conjugate(pilotOrientation) *
+            worldTurn *
+            pilotOrientation
+        )
+
+        rotationStack.pushRotation(localWorldTurn)
+
+        // MARK: - 5. TURBULENCE
 
         flightTime += dt
 
@@ -782,35 +713,28 @@ final class FlightSim {
             (7.0 * turbulenceLevel) *
             dt
 
-        // Aircraft attitude shake.
+        // Turbulence attitude shake uses the shared local stack.
 
         let shake = turbulenceLevel
 
+        rotationStack.pushRoll(
+            0.30 *
+            shake *
+            cos(t * 7.3) *
+            dt
+        )
+
+        rotationStack.pushPitch(
+            0.12 *
+            shake *
+            cos(t * 5.1 + 1.0) *
+            dt
+        )
+
+        // MARK: - Apply All Incremental Rotations
+
         orientation = simd_normalize(
-
-            orientation
-
-            *
-
-            simd_quatf(
-                angle:
-                    0.30 *
-                    shake *
-                    cos(t * 7.3) *
-                    dt,
-                axis: localForward
-            )
-
-            *
-
-            simd_quatf(
-                angle:
-                    0.12 *
-                    shake *
-                    cos(t * 5.1 + 1.0) *
-                    dt,
-                axis: localRight
-            )
+            orientation * rotationStack.combined
         )
 
         // MARK: - Keep the Jet Right Side Up

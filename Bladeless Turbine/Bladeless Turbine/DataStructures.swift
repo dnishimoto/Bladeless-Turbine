@@ -11,18 +11,30 @@ import SceneKit
 
 struct AircraftLocalRotationStack {
 
-    private(set) var rotations: [simd_quatf] = []
+    // Aircraft local coordinate system:
+    // +X = forward
+    // +Y = up
+    // +Z = right
 
     private let localForward = SIMD3<Float>(1, 0, 0)
     private let localUp = SIMD3<Float>(0, 1, 0)
     private let localRight = SIMD3<Float>(0, 0, 1)
 
+    private(set) var rotations: [simd_quatf] = []
+
+    // MARK: - Stack Management
+
     mutating func clear() {
         rotations.removeAll(keepingCapacity: true)
     }
 
+    // MARK: - Local Roll
+
     mutating func pushRoll(_ angle: Float) {
-        guard abs(angle) > 0.000001 else { return }
+
+        guard abs(angle) > 0.000001 else {
+            return
+        }
 
         rotations.append(
             simd_quatf(
@@ -32,8 +44,13 @@ struct AircraftLocalRotationStack {
         )
     }
 
+    // MARK: - Local Yaw
+
     mutating func pushYaw(_ angle: Float) {
-        guard abs(angle) > 0.000001 else { return }
+
+        guard abs(angle) > 0.000001 else {
+            return
+        }
 
         rotations.append(
             simd_quatf(
@@ -43,8 +60,13 @@ struct AircraftLocalRotationStack {
         )
     }
 
+    // MARK: - Local Pitch
+
     mutating func pushPitch(_ angle: Float) {
-        guard abs(angle) > 0.000001 else { return }
+
+        guard abs(angle) > 0.000001 else {
+            return
+        }
 
         rotations.append(
             simd_quatf(
@@ -53,6 +75,17 @@ struct AircraftLocalRotationStack {
             )
         )
     }
+
+    // MARK: - Arbitrary Local Rotation
+
+    mutating func pushRotation(_ rotation: simd_quatf) {
+
+        rotations.append(
+            simd_normalize(rotation)
+        )
+    }
+
+    // MARK: - Combined Rotation
 
     var combined: simd_quatf {
 
