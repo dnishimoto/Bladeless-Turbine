@@ -496,136 +496,292 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         return sum * 0.5
     }
 
-    private func updateCamera(dt: Float) {
-        let f = flight.forward, pos = flight.position
-        let worldUp = SIMD3<Float>(0, 1, 0)
+    private func updateCamera(
+        dt: Float,
+        aircraftRotation: simd_quatf
+    ) {
+        let pos = flight.position
+
         cameraNode.camera?.projectionDirection = .vertical
         cameraNode.camera?.fieldOfView = sideCamera ? 60 : 50
 
+        let localUp = SIMD3<Float>(0, 1, 0)
+        let rotatedUp = aircraftRotation.act(localUp)
+
         if sideCamera {
-            // Orbit: follow the spline around the engine, always looking at the engine axis.
-            orbitT += dt / 30                                   // one lap every 30 s
-            let local = catmullRom(Self.orbitPoints, orbitT) * Self.orbitCloseness
-            let q = flight.orientation
-            let camPos = pos + q.act(local)
-            let focusX = max(-1.8, min(2.2, local.x * 0.6)) + 0.4   // look along the engine as we pass
-            let focus = pos + q.act(SIMD3(focusX, 0, 0))
-            let up = q.act(worldUp)
+            // Orbit around the engine in aircraft-local coordinates.
+            orbitT += dt / 30
+
+            let localOffset =
+                catmullRom(Self.orbitPoints, orbitT) *
+                Self.orbitCloseness
+
+            let camPos = pos + aircraftRotation.act(localOffset)
+
+            let focusX = max(-1.8, min(2.2, localOffset.x * 0.6)) + 0.4
+            let focus = pos + aircraftRotation.act(
+                SIMD3<Float>(focusX, 0, 0)
+            )
+
             cameraPosition = camPos
             cameraNode.simdPosition = camPos
-            cameraNode.look(at: SCNVector3(focus.x, focus.y, focus.z), up: SCNVector3(up.x, up.y, up.z),
-                            localFront: SCNVector3(0, 0, -1))
+
+            cameraNode.look(
+                at: SCNVector3(focus.x, focus.y, focus.z),
+                up: SCNVector3(
+                    rotatedUp.x,
+                    rotatedUp.y,
+                    rotatedUp.z
+                ),
+                localFront: SCNVector3(0, 0, -1)
+            )
+
             return
         }
 
-        let target = pos - f * 8 + worldUp * 2.5
-        let look = pos + f * 3
-        let k = 1 - exp(-8 * dt)
-        cameraPosition = (cameraPosition == .zero) ? target : cameraPosition + (target - cameraPosition) * k
-        let minY = Terrain.height(cameraPosition.x, cameraPosition.z) + 3
-        cameraPosition.y = max(cameraPosition.y, minY)
-        cameraNode.simdPosition = cameraPosition
-        cameraNode.look(at: SCNVector3(look.x, look.y, look.z))
+        // Chase camera offset is defined in aircraft-local coordinates.
+        // Local -X is behind the aircraft; local +Y is above it.
+        let localCameraOffset = SIMD3<Float>(-30, 3, 0)
+
+        // Rotate the camera offset with the aircraft's complete rotation.
+        let worldOffset = aircraftRotation.act(localCameraOffset)
+        let target = pos + worldOffset
+
+        // Look forward along the aircraft's local +X axis.
+        let look = pos + aircraftRotation.act(
+            SIMD3<Float>(3, 0, 0)
+        )
+
+        // Camera follows the aircraft's roll, pitch, and yaw.
+        cameraPosition = target
+        cameraNode.simdPosition = target
+
+        cameraNode.look(
+            at: SCNVector3(look.x, look.y, look.z),
+            up: SCNVector3(
+                rotatedUp.x,
+                rotatedUp.y,
+                rotatedUp.z
+            ),
+            localFront: SCNVector3(0, 0, -1)
+        )
     }
 
     private func band(for temp: Float) -> Int8 {
         temp > 1200 ? 0 : temp > 900 ? 1 : temp > 600 ? 2 : 3
     }
 
-    func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
-        if lastTime == 0 { lastTime = time }
-        let frame = min(Float(time - lastTime), 0.1)
+    func renderer(
+        _ renderer: SCNSceneRenderer,
+        updateAtTime time: TimeInterval
+    ) {
+        // MARK: - Frame Timing
+
+        if lastTime == 0 {
+            lastTime = time
+            return
+        }
+
+        let elapsed = Float(time - lastTime)
         lastTime = time
 
-        // Flight: the engine's mass flow sets the speed; altitude and speed feed back into the cycle.
+        let frame = min(max(elapsed, 0), 0.1)
+        guard frame > 0 else { return }
+
+        // MARK: - Engine / CA Simulation
+
+        // Feed current flight conditions into the engine.
         sim.altitude = flight.altitude
         sim.airspeed = flight.speed
-        flight.step(dt: frame, cycle: sim.cycle)
-        flightNode.simdPosition = flight.position
-        flightNode.simdOrientation = flight.orientation
-        updateTerrain()
-        updateSplines()
-        updateCamera(dt: frame)
 
+        // Advance the engine CA at its configured fixed timestep.
         accumulator += frame
+
         let tickDt = 1 / cfg.tickRate
+
         while accumulator >= tickDt {
             sim.tick()
             accumulator -= tickDt
         }
+
         let alpha = accumulator / tickDt
 
+        // MARK: - Aircraft Flight Physics
+
+        // FlightSim receives the latest engine cycle.
+        flight.step(
+            dt: frame,
+            cycle: sim.cycle
+        )
+
+        // MARK: - Shared Aircraft Orientation
+
+        // FlightSim is the single authority for aircraft rotation.
+        // Its orientation contains the combined local roll, yaw, and pitch.
+        let aircraftRotation = flight.orientation
+
+        // MARK: - Engine / Aircraft Transform
+
+        // The engine is a child of flightNode.
+        // It inherits the aircraft's position and orientation.
+        flightNode.simdPosition = flight.position
+        flightNode.simdOrientation = aircraftRotation
+
+        // engineRoot retains its local engine-axis correction:
+        // engineRoot.eulerAngles.y = .pi
+
+        // MARK: - Terrain and Flight Path
+
+        updateTerrain()
+        updateSplines()
+
+        // MARK: - Camera
+
+        // Camera uses the exact same aircraft rotation as the engine.
+        updateCamera(
+            dt: frame,
+            aircraftRotation: aircraftRotation
+        )
+
+        // MARK: - Rotor Animation
+
         let angle = sim.diskAngle + sim.omega * accumulator
-        turbineSpinNode.eulerAngles.z = angle     // disc node: local Z is the engine axis
+
+        turbineSpinNode.eulerAngles.z = angle
         compressorSpinNode.eulerAngles.x = angle
         fanSpinNode.eulerAngles.x = angle
 
-        combustorMaterial.emission.intensity = CGFloat(max(0, min(1, (sim.flameTemp - 300) / 1500)))
+        // MARK: - Combustor
+
+        combustorMaterial.emission.intensity = CGFloat(
+            max(0, min(1, (sim.flameTemp - 300) / 1500))
+        )
+
+        // MARK: - Particle Rendering
 
         let particles = sim.particles
+
         for i in 0..<particles.count {
             let p = particles[i]
             let node = particleNodes[i]
+
             if !p.active {
-                if !node.isHidden { node.isHidden = true }
+                if !node.isHidden {
+                    node.isHidden = true
+                }
                 continue
             }
+
             node.isHidden = false
+
             let q = sim.renderPosition(of: p, alpha: alpha)
-            node.position = SCNVector3(q.x, q.y, q.z)
+
+            node.position = SCNVector3(
+                q.x,
+                q.y,
+                q.z
+            )
+
             let s = sim.visualScale(of: p)
+
             node.scale = SCNVector3(s, s, s)
+
             let b = band(for: p.temp)
+
             if b != lastBand[i] {
                 node.geometry = bandGeometries[Int(b)]
                 lastBand[i] = b
             }
         }
 
+        // MARK: - HUD Updates
+
         hudTimer += frame
+
         if hudTimer > 0.12 {
             hudTimer = 0
+
             let snapshot = sim.stations
-            let rpm = sim.rpm, pct = sim.shaftFraction * 100
-            let active = sim.activeCount, out = sim.exhaustedTotal
-            let flame = sim.flameTemp, flow = sim.fuelFlowGramsPerSec, used = sim.fuelUsedGrams
-            let thrust = sim.thrust, tq = sim.turbineTorque, ld = sim.compressorLoad
+
+            let rpm = sim.rpm
+            let pct = sim.shaftFraction * 100
+            let active = sim.activeCount
+            let out = sim.exhaustedTotal
+
+            let flame = sim.flameTemp
+            let flow = sim.fuelFlowGramsPerSec
+            let used = sim.fuelUsedGrams
+
+            let thrust = sim.thrust
+            let tq = sim.turbineTorque
+            let ld = sim.compressorLoad
+
             let starter = sim.starterOn
             let cyc = sim.cycle
             let measured = sim.measuredFlow
+
             let fs = flight
-            let fAlt = fs.altitude, fClr = fs.clearance, fSpd = fs.speed, fMach = fs.mach
-            let fHdg = fs.heading, fPit = fs.pitchAngle * 180 / .pi, fBank = fs.bank * 180 / .pi, fGCAS = fs.groundAvoid
-            let net = cyc.turbineTorque - cyc.compressorTorque - cyc.frictionTorque
-            let vExit = sim.exhaustVelocity, mdot = sim.exhaustMassFlow
-            let opr = sim.overallPressureRatio, sfc = sim.tsfc, counts = sim.stageCounts
-            DispatchQueue.main.async {
+
+            let fAlt = fs.altitude
+            let fClr = fs.clearance
+            let fSpd = fs.speed
+            let fMach = fs.mach
+
+            let fHdg = fs.heading
+            let fPit = fs.pitchAngle * 180 / .pi
+            let fBank = fs.bank * 180 / .pi
+            let fGCAS = fs.groundAvoid
+
+            let net = cyc.turbineTorque
+                - cyc.compressorTorque
+                - cyc.frictionTorque
+
+            let vExit = sim.exhaustVelocity
+            let mdot = sim.exhaustMassFlow
+
+            let opr = sim.overallPressureRatio
+            let sfc = sim.tsfc
+            let counts = sim.stageCounts
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+
                 self.stations = snapshot
+
                 self.rpm = rpm
                 self.shaftPercent = pct
+
                 self.activeCount = active
                 self.exhaustedTotal = out
+
                 self.flameTemp = flame
                 self.fuelFlow = flow
                 self.fuelUsed = used
+
                 self.thrust = thrust
                 self.exhaustVelocity = vExit
                 self.massFlow = mdot
+
                 self.pressureRatio = opr
                 self.tsfc = sfc
                 self.stageCounts = counts
+
                 self.turbineTorque = tq
                 self.compressorLoad = ld
                 self.starterOn = starter
+
                 self.cycle = cyc
                 self.measuredFlow = measured
+
                 self.flightAltitude = fAlt
                 self.flightClearance = fClr
                 self.flightSpeed = fSpd
                 self.flightMach = fMach
+
                 self.flightHeading = fHdg
                 self.flightPitch = fPit
                 self.flightBank = fBank
+
                 self.groundAvoid = fGCAS
                 self.netTorque = net
             }
