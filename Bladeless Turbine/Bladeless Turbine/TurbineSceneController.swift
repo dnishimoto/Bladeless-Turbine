@@ -52,7 +52,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     private let flightNode = SCNNode()
     private let engineRoot = SCNNode()
     private let terrainNode = SCNNode()
-    private var terrainCenter = SIMD2<Float>(repeating: .greatestFiniteMagnitude)
+    private let splineNode = SCNNode()
+    private var splineAnchorX: Float = .greatestFiniteMagnitude
     private var cameraPosition = SIMD3<Float>(0, 0, 0)
     private let turbineSpinNode = SCNNode()
     private let compressorSpinNode = SCNNode()
@@ -109,12 +110,12 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         let sky = UIColor(red: 0.55, green: 0.70, blue: 0.90, alpha: 1)
         scene.background.contents = sky
         scene.fogColor = sky
-        scene.fogStartDistance = 2500
-        scene.fogEndDistance = 7000
+        scene.fogStartDistance = 7000
+        scene.fogEndDistance = 15000
 
         let cam = SCNCamera()
         cam.zNear = 0.3
-        cam.zFar = 9000
+        cam.zFar = 22000
         cam.fieldOfView = 50
         cameraNode.camera = cam
         scene.rootNode.addChildNode(cameraNode)
@@ -133,6 +134,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         scene.rootNode.addChildNode(key)
 
         scene.rootNode.addChildNode(terrainNode)
+        scene.rootNode.addChildNode(splineNode)
         scene.rootNode.addChildNode(flightNode)
         engineRoot.scale = SCNVector3(0.8, 0.8, 0.8)      // ≈ 5 m long
         engineRoot.eulerAngles.y = .pi                    // intake faces the flight direction, exhaust trails
@@ -361,13 +363,106 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         return shape
     }
 
+    // MARK: Canyon guide splines (centre line, left/right boundaries, variable flight path)
+
+    private func lineNode(_ points: [SCNVector3], color: UIColor) -> SCNNode {
+        var indices = [Int32]()
+        for i in 0..<(points.count - 1) { indices.append(Int32(i)); indices.append(Int32(i + 1)) }
+        let geo = SCNGeometry(sources: [SCNGeometrySource(vertices: points)],
+                              elements: [SCNGeometryElement(indices: indices, primitiveType: .line)])
+        let m = SCNMaterial()
+        m.lightingModel = .constant
+        m.diffuse.contents = color
+        m.emission.contents = color
+        m.isDoubleSided = true
+        geo.materials = [m]
+        return SCNNode(geometry: geo)
+    }
+
+    private func updateSplines() {
+        let x0 = flight.position.x
+        guard abs(x0 - splineAnchorX) > 400 else { return }
+        splineAnchorX = x0
+
+        let step: Float = 80
+        let start = (x0 / step).rounded() * step - 800
+        var centre = [SCNVector3](), left = [SCNVector3](), right = [SCNVector3](), guide = [SCNVector3]()
+        for i in 0..<180 {
+            let x = start + Float(i) * step
+            func lift(_ p: SIMD3<Float>) -> SCNVector3 {
+                SCNVector3(p.x, Terrain.height(p.x, p.z) + 12, p.z)
+            }
+            centre.append(lift(Terrain.canyonCenterPath(x)))
+            left.append(lift(Terrain.canyonLeftBoundary(x)))
+            right.append(lift(Terrain.canyonRightBoundary(x)))
+            guide.append(lift(Terrain.canyonVariablePath(x)))
+        }
+        splineNode.childNodes.forEach { $0.removeFromParentNode() }
+        splineNode.addChildNode(lineNode(centre, color: .systemCyan))      // central spline
+        splineNode.addChildNode(lineNode(left, color: .systemGreen))       // guide boundary, left
+        splineNode.addChildNode(lineNode(right, color: .systemGreen))      // guide boundary, right
+        splineNode.addChildNode(lineNode(guide, color: .systemYellow))     // variable flight path
+    }
+
+    // MARK: Streaming terrain
+
+    private struct TileKey: Hashable { let x: Int, z: Int }
+    private var tiles: [TileKey: (node: SCNNode, cells: Int)] = [:]
+    private var pendingTiles: [TileKey: Int] = [:]
+    private var readyTiles: [(key: TileKey, cells: Int, data: Terrain.TileData)] = []
+    private let readyLock = NSLock()
+    private let tileQueue = DispatchQueue(label: "terrain.tiles", qos: .userInitiated, attributes: .concurrent)
+    /// Tiles kept around the jet: radius 6 → 13 × 13 tiles of 1.92 km, about 11.5 km each way.
+    private static let tileRadius = 6
+
+    private static func tileDetail(_ ring: Int) -> Int { ring <= 1 ? 32 : (ring <= 3 ? 16 : 8) }
+
     private func updateTerrain() {
-        let p = SIMD2<Float>(flight.position.x, flight.position.z)
-        if simd_distance(p, terrainCenter) > 1800 {
-            terrainCenter = p
-            terrainNode.childNodes.forEach { $0.removeFromParentNode() }
-            let meshNode = Terrain.mesh(centerX: p.x, centerZ: p.y)
-            terrainNode.addChildNode(meshNode)
+        let size = Terrain.tileSize
+        let cx = Int(floor(flight.position.x / size)), cz = Int(floor(flight.position.z / size))
+        let radius = Self.tileRadius
+
+        // 1. Add finished tiles (at most two per frame to avoid hitches).
+        readyLock.lock()
+        let batch = Array(readyTiles.prefix(2))
+        readyTiles.removeFirst(min(2, readyTiles.count))
+        readyLock.unlock()
+        for item in batch {
+            if pendingTiles[item.key] == item.cells { pendingTiles[item.key] = nil }
+            guard abs(item.key.x - cx) <= radius + 1, abs(item.key.z - cz) <= radius + 1 else { continue }
+            tiles[item.key]?.node.removeFromParentNode()
+            let node = Terrain.tileNode(from: item.data, name: "tile_\(item.key.x)_\(item.key.z)")
+            terrainNode.addChildNode(node)
+            tiles[item.key] = (node, item.cells)
+        }
+
+        // 2. Drop tiles that are now too far away.
+        for (key, tile) in tiles where abs(key.x - cx) > radius + 1 || abs(key.z - cz) > radius + 1 {
+            tile.node.removeFromParentNode()
+            tiles[key] = nil
+        }
+
+        // 3. Request missing or wrong-detail tiles, nearest first.
+        var wanted: [(key: TileKey, ring: Int)] = []
+        for dz in -radius...radius {
+            for dx in -radius...radius {
+                wanted.append((TileKey(x: cx + dx, z: cz + dz), max(abs(dx), abs(dz))))
+            }
+        }
+        wanted.sort { $0.ring < $1.ring }
+        for item in wanted {
+            if pendingTiles.count >= 6 { break }
+            let cells = Self.tileDetail(item.ring)
+            if tiles[item.key]?.cells == cells || pendingTiles[item.key] == cells { continue }
+            pendingTiles[item.key] = cells
+            let key = item.key
+            tileQueue.async { [weak self] in
+                let data = Terrain.tileData(tileX: key.x, tileZ: key.z, cellsPerSide: cells)
+                guard let self else { return }
+                self.readyLock.lock()
+                self.readyTiles.append((key, cells, data))
+                self.readyLock.unlock()
+            }
         }
     }
 
@@ -383,6 +478,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         SIMD3(-2.5, 1.8, -2.3)    // left rear, above
     ]
     private var orbitT: Float = 0
+    /// Scales the orbit spline toward the engine (1 = original, smaller = closer).
+    private static let orbitCloseness: Float = 0.6
 
     private func catmullRom(_ pts: [SIMD3<Float>], _ t: Float) -> SIMD3<Float> {
         let n = pts.count
@@ -408,7 +505,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         if sideCamera {
             // Orbit: follow the spline around the engine, always looking at the engine axis.
             orbitT += dt / 30                                   // one lap every 30 s
-            let local = catmullRom(Self.orbitPoints, orbitT)
+            let local = catmullRom(Self.orbitPoints, orbitT) * Self.orbitCloseness
             let q = flight.orientation
             let camPos = pos + q.act(local)
             let focusX = max(-1.8, min(2.2, local.x * 0.6)) + 0.4   // look along the engine as we pass
@@ -421,8 +518,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             return
         }
 
-        let target = pos - f * 15 + worldUp * 4.5
-        let look = pos + f * 8
+        let target = pos - f * 8 + worldUp * 2.5
+        let look = pos + f * 3
         let k = 1 - exp(-8 * dt)
         cameraPosition = (cameraPosition == .zero) ? target : cameraPosition + (target - cameraPosition) * k
         let minY = Terrain.height(cameraPosition.x, cameraPosition.z) + 3
@@ -447,6 +544,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         flightNode.simdPosition = flight.position
         flightNode.simdOrientation = flight.orientation
         updateTerrain()
+        updateSplines()
         updateCamera(dt: frame)
 
         accumulator += frame

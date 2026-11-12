@@ -1,4 +1,3 @@
-
 import Foundation
 import SceneKit
 import UIKit
@@ -744,6 +743,111 @@ enum CanyonSplineRenderer {
     }
 }
 
+
+// MARK: - Streaming terrain tiles (far view distance, built off the render thread)
+
+extension Terrain {
+
+    /// Raw mesh arrays for one tile; safe to build on a background queue.
+    struct TileData {
+        var vertices: [SCNVector3] = []
+        var normals: [SCNVector3] = []
+        var colors: [SIMD4<Float>] = []
+        var indices: [Int32] = []
+    }
+
+    /// Side length of one streamed tile in metres.
+    static let tileSize: Float = 1920
+
+    /// Builds tile (tileX, tileZ) with `cellsPerSide` quads per side (fewer = lower detail, farther away).
+    /// A skirt hangs below each edge so neighbouring tiles of different detail never show cracks.
+    static func tileData(tileX: Int, tileZ: Int, cellsPerSide n: Int) -> TileData {
+        var d = TileData()
+        let step = tileSize / Float(n)
+        let originX = Float(tileX) * tileSize
+        let originZ = Float(tileZ) * tileSize
+        let sample = max(15, min(60, step * 0.5))
+        let side = n + 1
+
+        d.vertices.reserveCapacity(side * side + 4 * side)
+        d.normals.reserveCapacity(side * side + 4 * side)
+        d.colors.reserveCapacity(side * side + 4 * side)
+
+        for row in 0...n {
+            for column in 0...n {
+                let x = originX + Float(column) * step
+                let z = originZ + Float(row) * step
+                let y = height(x, z)
+                let dx = (height(x + sample, z) - height(x - sample, z)) / (2 * sample)
+                let dz = (height(x, z + sample) - height(x, z - sample)) / (2 * sample)
+                let normal = simd_normalize(SIMD3<Float>(-dx, 1, -dz))
+                d.vertices.append(SCNVector3(x, y, z))
+                d.normals.append(SCNVector3(normal.x, normal.y, normal.z))
+                d.colors.append(terrainColor(height: y, slope: (dx * dx + dz * dz).squareRoot(), x: x, z: z))
+            }
+        }
+
+        d.indices.reserveCapacity(n * n * 6 + 4 * n * 6)
+        for row in 0..<n {
+            for column in 0..<n {
+                let a = Int32(row * side + column)
+                let b = a + 1
+                let c = Int32((row + 1) * side + column)
+                let e = c + 1
+                d.indices.append(contentsOf: [a, c, b, b, c, e])
+            }
+        }
+
+        // Skirts
+        let edges: [[Int]] = [
+            (0...n).map { $0 },                       // row 0
+            (0...n).map { n * side + $0 },            // last row
+            (0...n).map { $0 * side },                // first column
+            (0...n).map { $0 * side + n }             // last column
+        ]
+        for edge in edges {
+            let base = d.vertices.count
+            for i in edge {
+                let v = d.vertices[i]
+                d.vertices.append(SCNVector3(v.x, v.y - 140, v.z))
+                d.normals.append(d.normals[i])
+                d.colors.append(d.colors[i])
+            }
+            for k in 0..<n {
+                let top0 = Int32(edge[k]), top1 = Int32(edge[k + 1])
+                let low0 = Int32(base + k), low1 = Int32(base + k + 1)
+                d.indices.append(contentsOf: [top0, low0, top1, top1, low0, low1])
+            }
+        }
+        return d
+    }
+
+    /// Turns tile arrays into a scene node (call on the render/main thread).
+    static func tileNode(from d: TileData, name: String) -> SCNNode {
+        let colorData = d.colors.withUnsafeBufferPointer { Data(buffer: $0) }
+        let colorSource = SCNGeometrySource(
+            data: colorData, semantic: .color, vectorCount: d.colors.count,
+            usesFloatComponents: true, componentsPerVector: 4,
+            bytesPerComponent: MemoryLayout<Float>.size, dataOffset: 0,
+            dataStride: MemoryLayout<SIMD4<Float>>.stride)
+        let indexData = d.indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(
+            data: indexData, primitiveType: .triangles,
+            primitiveCount: d.indices.count / 3, bytesPerIndex: MemoryLayout<Int32>.size)
+        let geometry = SCNGeometry(
+            sources: [SCNGeometrySource(vertices: d.vertices), SCNGeometrySource(normals: d.normals), colorSource],
+            elements: [element])
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor.white
+        material.lightingModel = .lambert
+        material.isDoubleSided = true
+        geometry.materials = [material]
+        let node = SCNNode(geometry: geometry)
+        node.name = name
+        node.categoryBitMask = 1
+        return node
+    }
+}
 
 
 

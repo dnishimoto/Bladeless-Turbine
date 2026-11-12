@@ -16,9 +16,9 @@ final class FlightSim {
     // The aircraft's nose points along local +X.
     // Local +Y is up and local +Z is the aircraft's right wing.
     var position = SIMD3<Float>(0, 900, 0)
-    /// Starts pointing down the canyon (+Z), over the canyon floor.
+    /// Starts pointing down the canyon (+X), over the canyon floor.
     var orientation = simd_quatf(
-        angle: -.pi / 2,
+        angle: 0,
         axis: SIMD3<Float>(0, 1, 0)
     )
     var speed: Float = 70
@@ -36,8 +36,18 @@ final class FlightSim {
 
     static let safeClearance: Float = 50
     static let floorClearance: Float = 7
+    static let maxMach: Float = 2.0
+
+    // Left/right stick response
+    static let maxPilotBank: Float = 1.40      // rad, ≈ 80° at full deflection
+    static let rollResponse: Float = 7.0       // roll-rate gain on bank error (was 3)
+    static let stickYawRate: Float = 0.45      // rad/s of direct turn at full stick
 
     private let gravity: Float = 9.80665
+
+    /// Gust intensity 0…1: grows with Mach and with proximity to the canyon walls.
+    private(set) var turbulenceLevel: Float = 0
+    private var flightTime: Float = 0
 
     // Aircraft-local axes. These are deliberately NOT world-space vectors.
     private let localForward = SIMD3<Float>(1, 0, 0)
@@ -98,15 +108,15 @@ final class FlightSim {
     }
 
     func reset() {
-        let startX = Terrain.canyonCenterX(z: 0)
+        let startZ = Terrain.canyonCenterZ(0)
         position = SIMD3(
-            startX,
-            Terrain.height(startX, 0) + 700,
-            0
+            0,
+            Terrain.height(0, startZ) + 700,
+            startZ
         )
 
         orientation = simd_quatf(
-            angle: -.pi / 2,
+            angle: 0,
             axis: localUp
         )
 
@@ -121,7 +131,7 @@ final class FlightSim {
     /// Bank request (+ = right wing down) that steers toward the canyon axis ahead.
     private func canyonGuidanceBankTarget() -> Float {
         let lookAhead = max(140.0, min(420.0, speed * canyonLookAheadTime))
-        let travelSign: Float = forward.z >= 0 ? 1 : -1          // canyon runs along Z
+        let travelSign: Float = forward.x >= 0 ? 1 : -1          // canyon runs along X
         let target = Terrain.canyonFlightTarget(
             aircraftX: position.x,
             aircraftZ: position.z,
@@ -181,6 +191,7 @@ final class FlightSim {
 
         let weight = cfg.aircraftMass * gravity
         let climb = weight * forward.y
+        let speedOfSound = (cfg.gamma * cfg.gasConstant * Float(atm.t)).squareRoot()
 
         func dragAt(_ velocity: Float) -> Float {
 
@@ -196,12 +207,23 @@ final class FlightSim {
                 cfg.inducedDragFactor * weight * weight /
                 (q * cfg.wingArea)
 
-            return zeroLift + induced
+            // Transonic wave drag: rises through Mach 0.9–1.2, eases off supersonic.
+            let m = velocity / speedOfSound
+            let t = max(0, min(1, (m - 0.9) / 0.3))
+            let rise = t * t * (3 - 2 * t)
+            let supersonicRelief = 1 - 0.25 * max(0, min(1, m - 1.2))
+            let wave = q * cfg.wingArea * 0.035 * rise * supersonicRelief
+
+            return zeroLift + induced + wave
         }
 
         // MARK: - Thrust and Drag
 
-        let thrustForce = cycle.thrust
+        // Afterburner: the last 10 % of the throttle (fuel command above 0.9) lights the burner,
+        // boosting thrust up to the F100's 129.7 / 79.2 kN wet-to-dry ratio.
+        let fuelCommandFraction = cycle.fuelAirRatio / max(1.0e-4, cfg.maxFuelAirRatio)
+        let afterburner = max(0, min(1, (fuelCommandFraction - 0.9) / 0.1))
+        let thrustForce = cycle.thrust * (1 + 0.64 * afterburner)
         let dragForce = dragAt(speed)
 
         let netForce =
@@ -212,9 +234,10 @@ final class FlightSim {
 
         speed += acceleration * dt
 
+        // Top speed: Mach 2.0 at the local speed of sound.
         speed = max(
             0,
-            min(450, speed)
+            min(Self.maxMach * speedOfSound, speed)
         )
 
         drag = dragForce
@@ -231,14 +254,14 @@ final class FlightSim {
         let rollInput =
             abs(stickRoll) > 0.01 ? stickRoll : 0
 
-        let pilotBankTarget = rollInput * 1.05
+        let pilotBankTarget = rollInput * Self.maxPilotBank
 
         let canyonBankTarget = canyonGuidanceBankTarget()
 
         let bankTarget = max(
-            -1.05,
+            -Self.maxPilotBank,
             min(
-                1.05,
+                Self.maxPilotBank,
                 pilotBankTarget + canyonBankTarget
             )
         )
@@ -247,7 +270,7 @@ final class FlightSim {
 
         let rollCommand = max(
             -1,
-            min(1, rollError * 3.0)
+            min(1, rollError * Self.rollResponse)
         )
 
         let rollAngle =
@@ -262,7 +285,7 @@ final class FlightSim {
             abs(rudder) > 0.01 ? rudder : 0
 
         let pilotYawAngle =
-            -rudderInput * cfg.maxYawRate * dt
+            (-rudderInput * cfg.maxYawRate - rollInput * Self.stickYawRate) * dt
 
         rotationStack.pushYaw(pilotYawAngle)
 
@@ -299,12 +322,32 @@ final class FlightSim {
             simd_quatf(angle: -coordinatedTurnRate * dt, axis: worldUp) * orientation
         )
 
+        // MARK: - Turbulence
+
+        // Gusts push the jet sideways and vertically and shake its attitude; they are strongest
+        // in the narrow, fast sections near the canyon walls.
+        flightTime += dt
+        let wallProximity = Terrain.canyonRecoveryStrength(x: position.x, z: position.z)
+        turbulenceLevel = max(0, min(1, 0.2 + 0.6 * wallProximity + 0.25 * min(1, speed / 340)))
+        let t = flightTime
+        let gust = SIMD3<Float>(
+            sin(t * 1.7) + 0.5 * sin(t * 4.1 + 1.0),
+            0.6 * sin(t * 2.3 + 2.0) + 0.4 * sin(t * 5.9),
+            sin(t * 1.3 + 0.5) + 0.5 * sin(t * 3.7)
+        )
+        position += gust * (7.0 * turbulenceLevel) * dt
+        let shake = turbulenceLevel
+        orientation = simd_normalize(
+            orientation
+            * simd_quatf(angle: 0.30 * shake * cos(t * 7.3) * dt, axis: localForward)
+            * simd_quatf(angle: 0.12 * shake * cos(t * 5.1 + 1.0) * dt, axis: localRight)
+        )
+
         // MARK: - Forward Movement
 
-        // Ground track advances with Mach: distance = M · a · dt, times a visual scale.
-        let speedOfSound = (cfg.gamma * cfg.gasConstant * Float(atm.t)).squareRoot()
+        // Ground track at true Mach speed: distance = M · a(altitude) · dt.
         let machNumber = speed / speedOfSound
-        position += forward * (machNumber * speedOfSound * cfg.terrainSpeedScale) * dt
+        position += forward * (machNumber * speedOfSound) * dt
 
         // MARK: - Stall Descent
 
@@ -360,6 +403,3 @@ final class FlightSim {
     }
 
 }
-
-
-
