@@ -14,7 +14,26 @@ struct TurbineSceneView: UIViewRepresentable {
         view.preferredFramesPerSecond = 60
         view.antialiasingMode = .multisampling4X
         view.backgroundColor = .black
+
+        // Drag to swing the orbit camera around / above the engine (orbit mode only).
+        let pan = UIPanGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.pan(_:)))
+        pan.maximumNumberOfTouches = 1
+        view.addGestureRecognizer(pan)
         return view
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(controller: controller) }
+
+    final class Coordinator: NSObject {
+        let controller: TurbineSceneController
+        init(controller: TurbineSceneController) { self.controller = controller }
+
+        @objc func pan(_ g: UIPanGestureRecognizer) {
+            let t = g.translation(in: g.view)
+            g.setTranslation(.zero, in: g.view)
+            controller.orbitDrag(dx: Float(t.x), dy: Float(t.y))
+        }
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {}
@@ -129,6 +148,12 @@ struct BladelessTurbineView: View {
                 if controller.groundAvoid {
                     Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
                 }
+                if controller.canyonReturn && !controller.recoveryActive {
+                    Text("CA CANYON RETURN").font(.system(size: 10, weight: .heavy)).foregroundStyle(.yellow)
+                }
+                if controller.recoveryActive {
+                    Text("CA RECOVERY").font(.system(size: 10, weight: .heavy)).foregroundStyle(.orange)
+                }
             }
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
@@ -148,11 +173,25 @@ struct BladelessTurbineView: View {
             HStack(spacing: 10) {
                 F16ThrottleView(throttle: $fuel)
                     .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
-
-                Button(controller.sideCamera ? "CAMERA\nORBIT" : "CAMERA\nCHASE") { controller.toggleCamera() }
-                    .font(.system(size: 9, weight: .bold))
-                    .multilineTextAlignment(.center)
-                    .buttonStyle(.bordered)
+            
+                Button {
+                    controller.toggleCamera()
+                } label: {
+                    Image(systemName: controller.sideCamera ? "globe" : "globe.americas")
+                        .font(.system(size: 17, weight: .bold))
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityLabel(
+                    controller.sideCamera
+                        ? "Switch to chase camera"
+                        : "Switch to orbit camera"
+                )
+                .accessibilityValue(
+                    controller.sideCamera
+                        ? "Orbit \(controller.orbitPercent) percent"
+                        : "Chase camera"
+                )
 
                 AttitudeIndicator(bank: controller.flightBank, pitch: controller.flightPitch)
 

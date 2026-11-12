@@ -93,6 +93,8 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             guard let self else { return }
             self.sideCamera.toggle()
             self.orbitT = 0
+            self.orbitYawOffset = 0
+            self.orbitHeightOffset = 0
         }
     }
 
@@ -499,6 +501,18 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }()
     private var orbitT: Float = 0
+    /// Manual orbit offsets from dragging the scene while in orbit mode (radians / metres).
+    private var orbitYawOffset: Float = 0
+    private var orbitHeightOffset: Float = 0
+    /// Seconds for one automatic lap.
+    private static let orbitLapSeconds: Float = 14
+
+    /// Drag on the scene (orbit mode): horizontal swings around the engine, vertical raises/lowers.
+    func orbitDrag(dx: Float, dy: Float) {
+        guard sideCamera else { return }
+        orbitYawOffset += dx * 0.012
+        orbitHeightOffset = max(-1.2, min(1.8, orbitHeightOffset - dy * 0.01))
+    }
     /// Orbit ring radii around the engine centre, metres (smaller = closer).
     private static let orbitRadiusAlong: Float = 3.0
     private static let orbitRadiusSide: Float = 1.6
@@ -541,14 +555,14 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
             // MARK: - Orbit Path (one lap every 30 s, rotates with the jet)
 
-            orbitT += max(0, dt) / 30
+            orbitT += max(0, dt) / Self.orbitLapSeconds
             orbitT -= floor(orbitT)
 
             // Analytic closed ring (same shape as orbitPoints, no spline evaluation needed).
-            let a = orbitT * 2 * .pi
+            let a = orbitT * 2 * .pi + orbitYawOffset
             let ringOffset = SIMD3<Float>(
                 Self.orbitRadiusAlong * cos(a),
-                0.35 + 0.5 * sin(2 * a),
+                0.35 + 0.5 * sin(2 * a) + orbitHeightOffset,
                 Self.orbitRadiusSide * sin(a)
             )
             var camPos = engineCenter + q.act(ringOffset)
