@@ -9,9 +9,7 @@ import Foundation
 import SwiftUI
 import SceneKit
 
-
-
-/// One flight stick: drag left/right to bank and turn, up/down to pitch. Springs back to centre.
+/// One flight stick: drag left/right to bank and turn, pull down to pitch up. Springs back to centre.
 struct JoystickView: View {
     let onChange: (Float, Float) -> Void
     private let size: CGFloat = 110
@@ -36,11 +34,12 @@ struct JoystickView: View {
         .gesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { g in
-                    var dx = g.location.x - size / 2, dy = g.location.y - size / 2
+                    var dx = g.location.x - size / 2
+                    var dy = g.location.y - size / 2
                     let len = (dx * dx + dy * dy).squareRoot()
                     if len > radius { dx *= radius / len; dy *= radius / len }
                     offset = CGSize(width: dx, height: dy)
-                    onChange(Float(dx / radius), Float(-dy / radius))
+                    onChange(Float(dx / radius), Float(dy / radius))
                 }
                 .onEnded { _ in
                     offset = .zero
@@ -49,6 +48,3 @@ struct JoystickView: View {
         )
     }
 }
-
-
-

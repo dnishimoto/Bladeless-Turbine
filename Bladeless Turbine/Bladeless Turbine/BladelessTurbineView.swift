@@ -145,14 +145,9 @@ struct BladelessTurbineView: View {
                 metric("MACH", String(format: "%.2f", controller.flightMach))
                 metric("PITCH", String(format: "%+.0f°", controller.flightPitch))
                 metric("BANK", String(format: "%+.0f°", controller.flightBank))
+                metric("CAMERA", controller.sideCamera ? "ORBIT \(controller.orbitPercent)%" : "CHASE")
                 if controller.groundAvoid {
                     Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
-                }
-                if controller.canyonReturn && !controller.recoveryActive {
-                    Text("CA CANYON RETURN").font(.system(size: 10, weight: .heavy)).foregroundStyle(.yellow)
-                }
-                if controller.recoveryActive {
-                    Text("CA RECOVERY").font(.system(size: 10, weight: .heavy)).foregroundStyle(.orange)
                 }
             }
             .padding(.vertical, 3)
@@ -232,6 +227,5 @@ struct BladelessTurbineView: View {
         )
     }
 }
-
 
 #Preview { BladelessTurbineView() }

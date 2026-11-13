@@ -44,7 +44,15 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var canyonReturn = false
     @Published var orbitPercent: Int = 0
     /// true: camera sits close to the left of the engine (whole engine in view); false: chase view.
-    @Published var sideCamera = false
+    @Published var sideCamera = false {
+        didSet {
+            // Every switch restarts the lap from the start of the ring.
+            orbitT = 0
+            orbitHeight = 0
+            orbitFinishing = false
+            print("[camera] sideCamera =", sideCamera)
+        }
+    }
 
     let cfg: TurbineConfig
     let sim: TurbineCA
@@ -52,13 +60,16 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     let flight: FlightSim
     let scene = SCNScene()
     let cameraNode = SCNNode()
+    /// Camera rig: a child of `flightNode` (the engine's parent) sitting at the engine centre.
+    /// The camera is a child of the rig, so rotating the rig's local rotation swings the camera
+    /// around the engine, and everything inherits the jet's own rotation through `flightNode`.
+    private let cameraRig = SCNNode()
 
     private let flightNode = SCNNode()
     private let engineRoot = SCNNode()
     private let terrainNode = SCNNode()
     private let splineNode = SCNNode()
     private var splineAnchorX: Float = .greatestFiniteMagnitude
-    private var cameraPosition = SIMD3<Float>(0, 0, 0)
     private let turbineSpinNode = SCNNode()
     private let compressorSpinNode = SCNNode()
     private let fanSpinNode = SCNNode()
@@ -88,26 +99,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     func startEngine() { sim.startEngine() }
     func setStick(roll: Float, pitch: Float) { flight.stickRoll = roll; flight.stickPitch = pitch }
     func setRudder(_ v: Float) { flight.rudder = v }
-    /// Render-thread copy of the camera mode, set synchronously by the button so the renderer
-    /// never depends on when SwiftUI delivers the @Published change.
-    private let cameraModeLock = NSLock()
-    private var orbitModeFlag = false
-    private var orbitModeValue: Bool {
-        cameraModeLock.lock(); defer { cameraModeLock.unlock() }
-        return orbitModeFlag
-    }
-
+    /// The button just flips `sideCamera`; the renderer reads it directly, so setting
+    /// `sideCamera` from anywhere switches between chase and the 360° engine orbit.
     func toggleCamera() {
-        sideCamera.toggle()
-        cameraModeLock.lock()
-        orbitModeFlag.toggle()
-        let on = orbitModeFlag
-        orbitT = 0
-        orbitYawOffset = 0
-        orbitHeightOffset = 0
-        cameraModeLock.unlock()
-        if Thread.isMainThread { sideCamera = on }
-        else { DispatchQueue.main.async { [weak self] in self?.sideCamera = on } }
+        if Thread.isMainThread { sideCamera.toggle() }
+        else { DispatchQueue.main.async { [weak self] in self?.sideCamera.toggle() } }
     }
 
     func reset() {
@@ -147,7 +143,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         cam.zFar = 22000
         cam.fieldOfView = 50
         cameraNode.camera = cam
-        scene.rootNode.addChildNode(cameraNode)
+        // The camera is a child of the jet (the engine's parent), so it lives in the jet's local
+        // frame: it can never lag behind the jet, whatever the speed.
+        cameraRig.simdPosition = engineCentreLocal
+        flightNode.addChildNode(cameraRig)
+        cameraRig.addChildNode(cameraNode)
 
         let ambient = SCNNode()
         ambient.light = SCNLight()
@@ -496,81 +496,138 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         }
     }
 
-    /// Closed camera spline around the engine, in metres relative to the engine centre
-    /// (jet-local axes: x forward, y up, z right). A tilted ellipse ring: long axis along the
-    /// engine, with a gentle rise and fall so the camera sweeps above and below the casing.
-    private static let orbitPoints: [SIMD3<Float>] = {
-        let count = 12
-        let radiusAlong: Float = 4.2      // ahead of the intake / behind the nozzle
-        let radiusSide: Float = 2.6       // beside the casing
-        return (0..<count).map { i -> SIMD3<Float> in
-            let a = Float(i) / Float(count) * 2 * .pi
-            return SIMD3<Float>(
-                radiusAlong * cos(a),
-                0.5 + 0.9 * sin(2 * a),
-                radiusSide * sin(a)
-            )
-        }
-    }()
-    private var orbitT: Float = 0
-    /// Manual orbit offsets from dragging the scene while in orbit mode (radians / metres).
-    private var orbitYawOffset: Float = 0
-    private var orbitHeightOffset: Float = 0
-    /// Seconds for one automatic lap.
-    private static let orbitLapSeconds: Float = 14
+    // MARK: Camera
+    //
+    // Hierarchy:  flightNode (jet position + rotation)
+    //               ├─ engineRoot (the engine)
+    //               └─ cameraRig (at the engine centre; its LOCAL rotation orbits the camera)
+    //                    └─ cameraNode (offset from the engine, looks at the engine)
 
-    /// Drag on the scene (orbit mode): horizontal swings around the engine, vertical raises/lowers.
-    func orbitDrag(dx: Float, dy: Float) {
-        guard orbitModeValue else { return }
-        orbitYawOffset += dx * 0.012
-        orbitHeightOffset = max(-1.2, min(1.8, orbitHeightOffset - dy * 0.01))
+    /// Engine centre in jet-local coordinates (engineRoot is scaled 0.8 and yawed 180°).
+    private var engineCentreLocal: SIMD3<Float> {
+        let midX = (layout.xNose + layout.xExhaustEnd) * 0.5
+        return SIMD3<Float>(-midX * Float(engineRoot.scale.x), 0, 0)
     }
-    /// Orbit ring radii around the engine centre, metres (smaller = closer).
-    private static let orbitRadiusAlong: Float = 3.0
-    private static let orbitRadiusSide: Float = 1.6
-    /// Scales the orbit spline toward the engine (1 = original, smaller = closer).
-    private static let orbitCloseness: Float = 0.6
 
-    private func catmullRom(_ pts: [SIMD3<Float>], _ t: Float) -> SIMD3<Float> {
-        let n = pts.count
-        let u = t - floor(t)
-        let f = u * Float(n)
-        let i = Int(f) % n
-        let x = f - Float(Int(f))
-        let p0 = pts[(i + n - 1) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n]
-        let x2 = x * x, x3 = x2 * x
-        let c1: SIMD3<Float> = (p2 - p0) * x
-        let c2: SIMD3<Float> = (p0 * 2 - p1 * 5 + p2 * 4 - p3) * x2
-        let c3: SIMD3<Float> = (p1 * 3 - p0 - p2 * 3 + p3) * x3
-        let sum: SIMD3<Float> = p1 * 2 + c1 + c2 + c3
-        return sum * 0.5
-    }
+    /// Home pose, jet-local: behind and above the engine, looking ahead of the nose.
+    private static let homeLocal = SIMD3<Float>(-15, 4.5, 0)
+    private static let homeLookLocal = SIMD3<Float>(8, 0, 0)
 
     private func updateCamera(dt: Float) {
-         let f = flight.forward, pos = flight.position
-         let worldUp = SIMD3<Float>(0, 1, 0)
-         let target: SIMD3<Float>
-         let look: SIMD3<Float>
-         if sideCamera {
-             // Side view of the engine: flow runs left → right.
-             var side = simd_cross(f, worldUp)
-             if simd_length(side) < 0.05 { side = SIMD3(0, 0, 1) }
-             side = simd_normalize(side)
-             target = pos + side * 11 + worldUp * 1.2 - f * 0.4
-             look = pos - f * 0.4
-         } else {
-             target = pos - f * 15 + worldUp * 4.5
-             look = pos + f * 8
-         }
-         let k = 1 - exp(-8 * dt)
-         cameraPosition = (cameraPosition == .zero) ? target : cameraPosition + (target - cameraPosition) * k
-         // Keep the camera out of the ground too.
-         let minY = Terrain.height(cameraPosition.x, cameraPosition.z) + 3
-         cameraPosition.y = max(cameraPosition.y, minY)
-         cameraNode.simdPosition = cameraPosition
-         cameraNode.look(at: SCNVector3(look.x, look.y, look.z))
-     }
+        cameraNode.camera?.projectionDirection = .vertical
+        cameraNode.camera?.fieldOfView = sideCamera ? 60 : 50
 
+        let centre = engineCentreLocal
+        // Home pose relative to the rig (the engine centre).
+        var offset = Self.homeLocal - centre
+        var look = Self.homeLookLocal - centre
+        var rigRotation = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
+
+        if sideCamera {
+            let pose = orbitPose(dt: dt)
+            offset = pose.offset
+            look = pose.look
+            rigRotation = pose.rotation
+        }
+
+        // Keep the camera out of the ground: world position = jet + jet rotation · (rig + rotation · offset).
+        let world = flight.position + flight.orientation.act(centre + rigRotation.act(offset))
+        let floorY = Terrain.height(world.x, world.z) + 3
+        if world.y < floorY { offset.y += floorY - world.y }
+
+        cameraRig.simdPosition = centre                     // rig sits at the engine centre
+        cameraRig.simdOrientation = rigRotation             // local rotation: swings the camera round
+        cameraNode.simdPosition = offset                    // offset from the engine, rig space
+
+        // SCNNode.look(at:up:localFront:) takes WORLD-space coordinates, even for a child node, so
+        // convert the rig-space look-at point to world space through the rig and the jet.
+        let q = flight.orientation
+        let lookWorld = flight.position + q.act(centre + rigRotation.act(look))
+        let upWorld = q.act(SIMD3<Float>(0, 1, 0))          // the jet's up: the view banks with the jet
+        cameraNode.look(
+            at: SCNVector3(lookWorld.x, lookWorld.y, lookWorld.z),
+            up: SCNVector3(upWorld.x, upWorld.y, upWorld.z),
+            localFront: SCNVector3(0, 0, -1)
+        )
+    }
+
+    // MARK: Orbit loop
+
+    /// Progress through the loop, 0…1. 0 and 1 are both the home pose.
+    private var orbitT: Float = 0
+    private var orbitHeight: Float = 0
+    private var orbitFinishing = false
+    /// Seconds for the whole loop (leave home, circle the engine, return home).
+    private static let orbitLapSeconds: Float = 16
+
+    /// Closed spline of the camera's offset from the engine in the rig's own (unrotated) frame, on
+    /// the engine's rear side (x = −distance, y = height): home → swoop in → close pass with a small
+    /// height wave → swoop out → home. Rotating the rig about the engine's vertical axis sweeps
+    /// this curve 360° around the engine.
+    private var meridianSpline: [SIMD3<Float>] {
+        let home = Self.homeLocal - engineCentreLocal
+        return [
+            home,
+            SIMD3<Float>(-9, 3.2, 0),
+            SIMD3<Float>(-4.4, 1.6, 0),
+            SIMD3<Float>(-3.2, 0.5, 0),
+            SIMD3<Float>(-3.0, 0.9, 0),
+            SIMD3<Float>(-3.2, 0.5, 0),
+            SIMD3<Float>(-4.4, 1.6, 0),
+            SIMD3<Float>(-9, 3.2, 0)
+        ]
+    }
+
+    /// Closed Catmull-Rom spline through `pts`; t in 0…1 wraps around the loop.
+    private static func closedSpline(_ pts: [SIMD3<Float>], _ t: Float) -> SIMD3<Float> {
+        let n = pts.count
+        let u = (t - floor(t)) * Float(n)
+        let i = min(n - 1, Int(u))
+        let x = u - Float(i)
+        let p0 = pts[(i + n - 1) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n]
+        let a: SIMD3<Float> = p1 * 2
+        let b: SIMD3<Float> = (p2 - p0) * x
+        let c: SIMD3<Float> = (p0 * 2 - p1 * 5 + p2 * 4 - p3) * (x * x)
+        let d: SIMD3<Float> = (p1 * 3 - p0 - p2 * 3 + p3) * (x * x * x)
+        return (a + b + c + d) * 0.5
+    }
+
+    /// Drag while orbiting: horizontal scrubs along the loop, vertical raises or lowers the camera.
+    func orbitDrag(dx: Float, dy: Float) {
+        guard sideCamera else { return }
+        orbitT = max(0, min(0.999, orbitT + dx * 0.002))
+        orbitHeight = max(-1.2, min(1.8, orbitHeight - dy * 0.01))
+    }
+
+    /// Advances the loop. Returns the camera's offset from the engine and its look-at point (both in
+    /// rig space) plus the rig's local rotation. At the end of the loop the camera is back at the
+    /// home pose and `sideCamera` switches off.
+    private func orbitPose(dt: Float) -> (offset: SIMD3<Float>, look: SIMD3<Float>, rotation: simd_quatf) {
+        orbitT = min(1, orbitT + max(0, dt) / Self.orbitLapSeconds)
+
+        var offset = Self.closedSpline(meridianSpline, orbitT)
+        offset.y += orbitHeight * sin(.pi * orbitT)         // drag height fades out toward home
+
+        // Rig rotation: one full 360° turn about the engine's vertical axis, eased in the middle
+        // of the loop; 0 at both ends so the camera lands exactly on the home pose.
+        let s = max(0, min(1, (orbitT - 0.15) / 0.70))
+        let ease = s * s * (3 - 2 * s)
+        let rotation = simd_quatf(angle: 2 * .pi * ease, axis: SIMD3<Float>(0, 1, 0))
+
+        // Look at the engine centre while close; ease to the home look-at at the ends.
+        let home = max(0, min(1, (orbitT - 0.85) / 0.15)) + max(0, min(1, (0.15 - orbitT) / 0.15))
+        let homeLook = Self.homeLookLocal - engineCentreLocal
+        let look = homeLook * min(1, home)
+
+        let pct = Int(orbitT * 100)
+        if pct != orbitPercent { DispatchQueue.main.async { self.orbitPercent = pct } }
+
+        if orbitT >= 1 && !orbitFinishing {
+            orbitFinishing = true
+            DispatchQueue.main.async { [weak self] in self?.sideCamera = false }   // back to home
+        }
+        return (offset, look, rotation)
+    }
 
     private func band(for temp: Float) -> Int8 {
         temp > 1200 ? 0 : temp > 900 ? 1 : temp > 600 ? 2 : 3

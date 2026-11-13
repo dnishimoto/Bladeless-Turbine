@@ -53,7 +53,7 @@ final class FlightSim {
     /// Cellular-automaton attitude recovery (takes over when control is lost).
     let recoveryCA = AttitudeRecoveryCA()
     private(set) var recoveryActive = false
-    /// True while the CA is flying the jet back into the canyon (far off the guide splines).
+    /// True while the CA is flying the jet back into the canyon (far off the guide splines or high above the rim).
     private(set) var canyonReturnActive = false
     private var recoveryLevelTime: Float = 0
     /// Seconds the CA stays out after the pilot lets go of the stick.
@@ -467,23 +467,45 @@ final class FlightSim {
         let diving = pitch < -0.5 && clearanceAhead < 250
         let risk = max(0, min(1, 1 - clearanceAhead / 400))
 
-        // Canyon return: far outside the guide splines the CA's goal moves from "level" to
-        // "banked toward the canyon axis, climbing if low". Hysteresis: enter beyond the canyon
-        // edge + 40 m, leave once back inside 60 % of the safe corridor.
-        let lateral = abs(Terrain.canyonLateralError(x: position.x, z: position.z))
+        // Canyon return: far outside the guide splines or above the canyon rim, the CA's goal
+        // moves from "level" to "banked toward the canyon axis, descending back into the canyon
+        // if high or climbing if low".
+        let centerZ = Terrain.canyonCenterZ(position.x)
+        let lateral = abs(position.z - centerZ)
         let safeEdge = Terrain.canyonPathHalfWidth - Terrain.canyonRecoveryMargin
-        if lateral > safeEdge + 20 { canyonReturnActive = true }
-        else if lateral < safeEdge * 0.5 { canyonReturnActive = false }
+        let canyonFloor = Terrain.height(position.x, centerZ)
+        let targetCanyonAltitude = canyonFloor + 180.0
+        let altitudeExcess = position.y - targetCanyonAltitude
+
+        if lateral > safeEdge + 20 || altitudeExcess > 260 {
+            canyonReturnActive = true
+        } else if lateral < safeEdge * 0.5 && abs(altitudeExcess) < 120 {
+            canyonReturnActive = false
+        }
 
         var goalBank: Float = 0
-        var goalPitch: Float = 0.1
+        var goalPitch: Float = 0.05
         if canyonReturnActive {
-            // Steer hard toward the guide path: amplified guidance bank, never shallower than 0.5 rad
-            // while the guidance asks for any turn at all.
+            // 1. Lateral homing: steer hard toward the guide path.
             let g = canyonGuidanceBankTarget() * 1.8
-            goalBank = abs(g) > 0.1 ? max(-1.15, min(1.15, g.sign == .minus ? min(g, -0.5) : max(g, 0.5))) : g
-            if clearanceAhead < 300 { goalPitch = 0.25 }       // altitude: climb while low
+            goalBank = abs(g) > 0.1
+                ? max(-1.15, min(1.15, g.sign == .minus ? min(g, -0.5) : max(g, 0.5)))
+                : g
+
+            // 2. Vertical homing: gravitate back down into the canyon when high, or climb when low.
+            if clearanceAhead < 220 {
+                goalPitch = 0.25
+            } else if altitudeExcess > 40 {
+                let safetyScale = max(0.0, min(1.0, (clearanceAhead - 220.0) / 250.0))
+                let desiredDescent = -min(0.45, (altitudeExcess / 600.0) * 0.45)
+                goalPitch = desiredDescent * safetyScale
+            } else if altitudeExcess < -40 {
+                goalPitch = min(0.25, (-altitudeExcess / 300.0) * 0.25)
+            } else {
+                goalPitch = 0.0
+            }
         }
+
         recoveryCA.rebuildCosts(terrainRisk: risk, goalBank: goalBank, goalPitch: goalPitch)
         recoveryCA.sweep(count: 3)
 
