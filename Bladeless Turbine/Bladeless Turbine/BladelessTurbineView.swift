@@ -44,7 +44,7 @@ struct PressureOverlay: View {
     let stations: [PressureStation]
     let ambient: Float
 
-    private static let shortNames = ["FAN", "LPC", "HPC", "BURN", "HPT", "LPT", "COLL", "DUCT", "NOZ"]
+    static let shortNames = ["FAN", "LPC", "HPC", "BURN", "HPT", "LPT", "COLL", "DUCT", "NOZ"]
 
     private func colour(_ kPa: Float) -> Color {
         let ratio = kPa / ambient
@@ -113,6 +113,33 @@ struct BladelessTurbineView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .foregroundStyle(.white)
+
+            // Standalone Single Score Overlay Badge (Top-Right)
+            VStack {
+                HStack {
+                    Spacer()
+                    VStack(spacing: 1) {
+                        Text("SCORE")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.yellow)
+                        Text("\(controller.score)")
+                            .font(.system(size: 18, weight: .heavy, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .contentTransition(.numericText())
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 12)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.yellow.opacity(0.4), lineWidth: 1)
+                    )
+                    .padding(.top, 50)
+                    .padding(.trailing, 12)
+                }
+                Spacer()
+            }
+            .allowsHitTesting(false)
         }
         .onAppear {
             controller.setFuel(Float(fuel))
@@ -121,54 +148,55 @@ struct BladelessTurbineView: View {
     }
 
     private var topBar: some View {
-        let c = controller.cycle
-        return VStack(spacing: 4) {
-            PressureOverlay(stations: controller.stations, ambient: controller.cfg.ambientPressure)
+            let c = controller.cycle
+            return VStack(spacing: 4) {
+                // Streamlined key indicators row
+                HStack(spacing: 10) {
+                    metric("FUEL RATE", String(format: "%.0f g/s", controller.fuelFlow))
+                    metric("SHAFT", String(format: "%.0f rpm", controller.rpm))
+                    metric("THROTTLE", String(format: "%.0f%%", fuel * 100))
+                    metric("AIR INTAKE", String(format: "%.1f kg/s", c.intakeAirFlow))
+                    metric("THRUST", String(format: "%.1f kN", controller.thrust / 1000))
+                    metric("MASS FLOW", String(format: "%.1f kg/s", controller.massFlow))
+                }
+                .padding(.vertical, 3)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
-            // Streamlined key indicators row
-            HStack(spacing: 10) {
-                metric("FUEL RATE", String(format: "%.0f g/s", controller.fuelFlow))
-                metric("SHAFT", String(format: "%.0f rpm", controller.rpm))
-                metric("THROTTLE", String(format: "%.0f%%", fuel * 100))
-                metric("AIR INTAKE", String(format: "%.1f kg/s", c.intakeAirFlow))
-                metric("THRUST", String(format: "%.1f kN", controller.thrust / 1000))
-                metric("MASS FLOW", String(format: "%.1f kg/s", controller.massFlow))
-            }
-            .padding(.vertical, 3)
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                HStack(spacing: 10) {
+                    metric("ALT", String(format: "%.0f m", controller.flightAltitude))
+                    metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed))
+                    metric("MACH", String(format: "%.2f", controller.flightMach))
+                    if controller.groundAvoid {
+                        Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
+                    }
+                }
+                .padding(.vertical, 3)
+                .padding(.horizontal, 8)
+                .frame(maxWidth: .infinity)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
-            HStack(spacing: 10) {
-                metric("ALT", String(format: "%.0f m", controller.flightAltitude))
-                metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed))
-                metric("MACH", String(format: "%.2f", controller.flightMach))
-                metric("PITCH", String(format: "%+.0f°", controller.flightPitch))
-                metric("BANK", String(format: "%+.0f°", controller.flightBank))
-                metric("CAMERA", controller.sideCamera ? "ORBIT \(controller.orbitPercent)%" : "CHASE")
-                if controller.groundAvoid {
-                    Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
+                HStack(alignment: .top, spacing: 6) {
+                    metric("MASS FLOW",
+                           String(format:" %.1f kg/s",  controller.measuredFlow))
+                    metric("ALT", String(format: "%.0f m", controller.flightAltitude))
+                    metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed))
+                    metric("MACH", String(format: "%.2f", controller.flightMach))
+       
+                    if controller.groundAvoid {
+                        Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
+                    }
                 }
             }
-            .padding(.vertical, 3)
-            .padding(.horizontal, 8)
-            .frame(maxWidth: .infinity)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-
-            HStack(alignment: .top, spacing: 6) {
-                eqCard("MASS FLOW", [
-                    String(format: "f %.4f  ṁe %.1f  CA %.1f kg/s", c.fuelAirRatio, c.exhaustFlow, controller.measuredFlow)
-                ])
-            }
         }
-    }
 
-    private var bottomBar: some View {
+    var bottomBar: some View {
         VStack(spacing: 4) {
             HStack(spacing: 10) {
                 F16ThrottleView(throttle: $fuel)
                     .onChange(of: fuel) { _, v in controller.setFuel(Float(v)) }
-            
+
                 Button {
                     controller.toggleCamera()
                 } label: {
@@ -198,7 +226,7 @@ struct BladelessTurbineView: View {
         }
     }
 
-    private func metric(_ label: String, _ value: String) -> some View {
+    func metric(_ label: String, _ value: String) -> some View {
         VStack(spacing: 0) {
             Text(label).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
             Text(value).font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -206,12 +234,12 @@ struct BladelessTurbineView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func eqCard(_ title: String, _ lines: [String]) -> some View {
+    func eqCard(_ title: String, _ lines: [String]) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                 .foregroundStyle(.cyan)
-            
+
             ForEach(lines, id: \.self) { line in
                 Text(line)
                     .font(.system(size: 10.5, design: .monospaced))
