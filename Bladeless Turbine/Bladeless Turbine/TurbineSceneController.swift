@@ -73,7 +73,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     private let splineNode = SCNNode()
     private var splineAnchorX: Float = .greatestFiniteMagnitude
     private let ringsRootNode = SCNNode()
-    private struct CanyonRing {
+    struct CanyonRing {
         let index: Int
         let center: SIMD3<Float>
         let normal: SIMD3<Float>
@@ -81,7 +81,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         let node: SCNNode
         var scored: Bool = false
     }
-    private var canyonRings: [Int: CanyonRing] = [:]
+    var canyonRings: [Int: CanyonRing] = [:]
     private var previousFlightPosition: SIMD3<Float>?
     private static let ringRadius: Float = 38.0
     private let turbineSpinNode = SCNNode()
@@ -535,8 +535,16 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 )
             }
 
-            // 2. Check if the engine passes through any active ring.
-            for (index, ring) in canyonRings where !ring.scored {
+            // 2. Check if the engine approaches or passes through any active ring.
+            for (index, var ring) in canyonRings where !ring.scored {
+                let distanceToRing = simd_distance(currPos, ring.center)
+
+                // Turn green when approaching within 120 meters
+                if distanceToRing <= 120.0 {
+                    ring.node.geometry?.firstMaterial?.diffuse.contents = UIColor.systemGreen
+                    ring.node.geometry?.firstMaterial?.emission.contents = UIColor.systemGreen
+                }
+
                 // Vector from ring center to previous and current positions
                 let vPrev = prevPos - ring.center
                 let vCurr = currPos - ring.center
@@ -546,12 +554,17 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
                 // Check if the aircraft crossed the ring plane (sign change of dot product)
                 if dPrev * dCurr <= 0 {
-                    let intersectionPoint = currPos // Approximate intersection point
-                    let distanceFromCenter = simd_distance(intersectionPoint, ring.center)
+                    let distanceFromCenter = simd_distance(currPos, ring.center)
 
                     // Verify if the engine passed through the ring's opening
                     if distanceFromCenter <= ring.radius {
-                        canyonRings[index]?.scored = true
+                        ring.scored = true
+                        
+                        // Ensure it's green and trigger celebration effects
+                        ring.node.geometry?.firstMaterial?.diffuse.contents = UIColor.systemGreen
+                        ring.node.geometry?.firstMaterial?.emission.contents = UIColor.systemGreen
+                        
+                        canyonRings[index] = ring
                         
                         // Trigger particle burst at the ring center
                         spawnRingBurst(at: ring.center)
@@ -562,6 +575,9 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                         }
                     }
                 }
+                
+                // Save any state changes back to the dictionary
+                canyonRings[index] = ring
             }
 
             // 3. Remove distant rings in either direction.
@@ -574,6 +590,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 canyonRings.removeValue(forKey: index)
             }
         }
+
 
     private func spawnRingBurst(at position: SIMD3<Float>) {
         let burstNode = SCNNode()

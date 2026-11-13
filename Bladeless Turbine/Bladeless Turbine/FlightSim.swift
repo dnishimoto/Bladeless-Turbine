@@ -12,6 +12,8 @@ import UIKit
 
 final class FlightSim {
 
+    private var joystickInactiveTime: Float = 0
+    
     let cfg: TurbineConfig
 
     // MARK: - Aircraft Coordinate System
@@ -511,93 +513,104 @@ final class FlightSim {
         return x
     }
 
-    /// Decides whether control has been lost and, if so, drives roll/pitch from the CA field.
-    /// Returns (rollCommand, pitchCommand) in −1…1, or nil when the pilot is in control.
     private func recoveryCommands(dt: Float) -> (roll: Float, pitch: Float)? {
-        // Touching the stick hands control to the pilot immediately; the CA waits 1.5 s after release.
-        if abs(stickRoll) > 0.05 || abs(stickPitch) > 0.05 {
-            recoveryActive = false
-            canyonReturnActive = false
-            recoveryLevelTime = 0
-            pilotHoldoff = 1.5
-            return nil
-        }
-        if pilotHoldoff > 0 {
-            pilotHoldoff -= dt
-            return nil
-        }
+            // 1. Check if the joystick is currently active
+            let stickActive = abs(stickRoll) > 0.01 || abs(stickPitch) > 0.01 ||
+                              abs(filteredStickRoll) > 0.01 || abs(filteredStickPitch) > 0.01
 
-        let (roll, pitch) = attitudeAngles()
-        let clearanceAhead = projectedClearance()
-        let diving = pitch < -0.5 && clearanceAhead < 250
-        let risk = max(0, min(1, 1 - clearanceAhead / 400))
-
-        // Canyon return: far outside the guide splines or above the canyon rim, the CA's goal
-        // moves from "level" to "banked toward the canyon axis, descending back into the canyon
-        // if high or climbing if low".
-        let centerZ = Terrain.canyonCenterZ(position.x)
-        let lateral = abs(position.z - centerZ)
-        let safeEdge = Terrain.canyonPathHalfWidth - Terrain.canyonRecoveryMargin
-        let canyonFloor = Terrain.height(position.x, centerZ)
-        let targetCanyonAltitude = canyonFloor + 180.0
-        let altitudeExcess = position.y - targetCanyonAltitude
-
-        if lateral > safeEdge + 20 || altitudeExcess > 260 {
-            canyonReturnActive = true
-        } else if lateral < safeEdge * 0.5 && abs(altitudeExcess) < 120 {
-            canyonReturnActive = false
-        }
-
-        var goalBank: Float = 0
-        var goalPitch: Float = 0.05
-        if canyonReturnActive {
-            // 1. Lateral homing: steer hard toward the guide path.
-            let g = canyonGuidanceBankTarget() * 1.8
-            goalBank = abs(g) > 0.1
-                ? max(-1.15, min(1.15, g.sign == .minus ? min(g, -0.5) : max(g, 0.5)))
-                : g
-
-            // 2. Vertical homing: gravitate back down into the canyon when high, or climb when low.
-            if clearanceAhead < 220 {
-                goalPitch = 0.25
-            } else if altitudeExcess > 40 {
-                let safetyScale = max(0.0, min(1.0, (clearanceAhead - 220.0) / 250.0))
-                let desiredDescent = -min(0.45, (altitudeExcess / 600.0) * 0.45)
-                goalPitch = desiredDescent * safetyScale
-            } else if altitudeExcess < -40 {
-                goalPitch = min(0.25, (-altitudeExcess / 300.0) * 0.25)
-            } else {
-                goalPitch = 0.0
+            if stickActive {
+                // Reset the inactivity timer whenever the joystick moves
+                joystickInactiveTime = 0
+                recoveryActive = false
+                canyonReturnActive = false
+                recoveryLevelTime = 0
+                pilotHoldoff = 1.5
+                return nil
             }
+
+            // 2. Accumulate inactivity time while the stick is centered / untouched
+            joystickInactiveTime += dt
+            
+            // 3. Keep recovery disabled until 3 full seconds of inactivity have elapsed
+            if joystickInactiveTime < 3.0 {
+                recoveryActive = false
+                canyonReturnActive = false
+                return nil
+            }
+
+            if pilotHoldoff > 0 {
+                pilotHoldoff -= dt
+                return nil
+            }
+
+            let (roll, pitch) = attitudeAngles()
+            let clearanceAhead = projectedClearance()
+            let diving = pitch < -0.5 && clearanceAhead < 250
+            let risk = max(0, min(1, 1 - clearanceAhead / 400))
+
+            // Canyon return logic
+            let centerZ = Terrain.canyonCenterZ(position.x)
+            let lateral = abs(position.z - centerZ)
+            let safeEdge = Terrain.canyonPathHalfWidth - Terrain.canyonRecoveryMargin
+            let canyonFloor = Terrain.height(position.x, centerZ)
+            let targetCanyonAltitude = canyonFloor + 180.0
+            let altitudeExcess = position.y - targetCanyonAltitude
+
+            if lateral > safeEdge + 20 || altitudeExcess > 260 {
+                canyonReturnActive = true
+            } else if lateral < safeEdge * 0.5 && abs(altitudeExcess) < 120 {
+                canyonReturnActive = false
+            }
+
+            var goalBank: Float = 0
+            var goalPitch: Float = 0.05
+            if canyonReturnActive {
+                let g = canyonGuidanceBankTarget() * 1.8
+                goalBank = abs(g) > 0.1
+                    ? max(-1.15, min(1.15, g.sign == .minus ? min(g, -0.5) : max(g, 0.5)))
+                    : g
+
+                if clearanceAhead < 220 {
+                    goalPitch = 0.25
+                } else if altitudeExcess > 40 {
+                    let safetyScale = max(0.0, min(1.0, (clearanceAhead - 220.0) / 250.0))
+                    let desiredDescent = -min(0.45, (altitudeExcess / 600.0) * 0.45)
+                    goalPitch = desiredDescent * safetyScale
+                } else if altitudeExcess < -40 {
+                    goalPitch = min(0.25, (-altitudeExcess / 300.0) * 0.25)
+                } else {
+                    goalPitch = 0.0
+                }
+            }
+
+            recoveryCA.rebuildCosts(terrainRisk: risk, goalBank: goalBank, goalPitch: goalPitch)
+            recoveryCA.sweep(count: 3)
+
+            let lost = abs(roll) > Self.bankLimit * 0.95 || abs(pitch) > Self.pitchLimit * 0.95
+                || up.y < 0.15 || diving
+            if lost { recoveryActive = true; recoveryLevelTime = 0 }
+
+            if canyonReturnActive && !recoveryActive {
+                let t = recoveryCA.target(roll: roll, pitch: pitch)
+                return (max(-1, min(1, wrapAngle(t.roll - roll) * 4)),
+                        max(-1, min(1, (t.pitch - pitch) * 4)))
+            }
+
+            guard recoveryActive else { return nil }
+
+            if abs(roll) < 0.2 && pitch > -0.1 && pitch < 0.35 && !diving {
+                recoveryLevelTime += dt
+                if recoveryLevelTime > 0.5 { recoveryActive = false; return nil }
+            } else {
+                recoveryLevelTime = 0
+            }
+
+            let target = recoveryCA.target(roll: roll, pitch: pitch)
+            let rollCmd = max(-1, min(1, wrapAngle(target.roll - roll) * 4))
+            let pitchCmd = max(-1, min(1, (target.pitch - pitch) * 4))
+            return (rollCmd, pitchCmd)
         }
-
-        recoveryCA.rebuildCosts(terrainRisk: risk, goalBank: goalBank, goalPitch: goalPitch)
-        recoveryCA.sweep(count: 3)
-
-        let lost = abs(roll) > Self.bankLimit * 0.95 || abs(pitch) > Self.pitchLimit * 0.95
-            || up.y < 0.15 || diving
-        if lost { recoveryActive = true; recoveryLevelTime = 0 }
-
-        if canyonReturnActive && !recoveryActive {
-            let t = recoveryCA.target(roll: roll, pitch: pitch)
-            return (max(-1, min(1, wrapAngle(t.roll - roll) * 4)),
-                    max(-1, min(1, (t.pitch - pitch) * 4)))
-        }
-
-        guard recoveryActive else { return nil }
-
-        if abs(roll) < 0.2 && pitch > -0.1 && pitch < 0.35 && !diving {
-            recoveryLevelTime += dt
-            if recoveryLevelTime > 0.5 { recoveryActive = false; return nil }
-        } else {
-            recoveryLevelTime = 0
-        }
-
-        let target = recoveryCA.target(roll: roll, pitch: pitch)
-        let rollCmd = max(-1, min(1, wrapAngle(target.roll - roll) * 4))
-        let pitchCmd = max(-1, min(1, (target.pitch - pitch) * 4))
-        return (rollCmd, pitchCmd)
-    }
+ 
 
     private func projectedClearance() -> Float {
 

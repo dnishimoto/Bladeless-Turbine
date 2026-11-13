@@ -1,6 +1,9 @@
 import SwiftUI
 import SceneKit
 
+import SwiftUI
+import SceneKit
+
 struct TurbineSceneView: UIViewRepresentable {
     let controller: TurbineSceneController
 
@@ -113,33 +116,6 @@ struct BladelessTurbineView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .foregroundStyle(.white)
-
-            // Standalone Single Score Overlay Badge (Top-Right)
-            VStack {
-                HStack {
-                    Spacer()
-                    VStack(spacing: 1) {
-                        Text("SCORE")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.yellow)
-                        Text("\(controller.score)")
-                            .font(.system(size: 18, weight: .heavy, design: .monospaced))
-                            .foregroundStyle(.white)
-                            .contentTransition(.numericText())
-                    }
-                    .padding(.vertical, 6)
-                    .padding(.horizontal, 12)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.yellow.opacity(0.4), lineWidth: 1)
-                    )
-                    .padding(.top, 50)
-                    .padding(.trailing, 12)
-                }
-                Spacer()
-            }
-            .allowsHitTesting(false)
         }
         .onAppear {
             controller.setFuel(Float(fuel))
@@ -148,48 +124,49 @@ struct BladelessTurbineView: View {
     }
 
     private var topBar: some View {
-            let c = controller.cycle
-            return VStack(spacing: 4) {
-                // Streamlined key indicators row
-                HStack(spacing: 10) {
-                    metric("FUEL RATE", String(format: "%.0f g/s", controller.fuelFlow))
-                    metric("SHAFT", String(format: "%.0f rpm", controller.rpm))
-                    metric("THROTTLE", String(format: "%.0f%%", fuel * 100))
-                    metric("AIR INTAKE", String(format: "%.1f kg/s", c.intakeAirFlow))
-                    metric("THRUST", String(format: "%.1f kN", controller.thrust / 1000))
-                    metric("MASS FLOW", String(format: "%.1f kg/s", controller.massFlow))
-                }
-                .padding(.vertical, 3)
-                .padding(.horizontal, 8)
-                .frame(maxWidth: .infinity)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        let c = controller.cycle
+        return VStack(spacing: 4) {
+            // Streamlined key indicators row
+            HStack(spacing: 10) {
+                metric("FUEL RATE", String(format: "%.0f g/s", controller.fuelFlow), color: .cyan)
+                metric("SHAFT", String(format: "%.0f rpm", controller.rpm), color: .yellow)
+                metric("THROTTLE", String(format: "%.0f%%", fuel * 100), color: .orange)
+                metric("AIR INTAKE", String(format: "%.1f kg/s", c.intakeAirFlow), color: .pink)
+                metric("THRUST", String(format: "%.1f kN", controller.thrust / 1000), color: .green)
+                metric("MASS FLOW", String(format: "%.1f kg/s", controller.massFlow), color: .red)
+            }
+            .padding(.vertical, 3)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
-                HStack(spacing: 10) {
-                    metric("ALT", String(format: "%.0f m", controller.flightAltitude))
-                    metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed))
-                    metric("MACH", String(format: "%.2f", controller.flightMach))
-                    if controller.groundAvoid {
-                        Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
-                    }
+            HStack(spacing: 10) {
+                metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed), color: .cyan)
+                metric("MACH", String(format: "%.2f", controller.flightMach), color: .yellow)
+                
+                metric("SCORE", String(format: "%.0f", Double(controller.score)), color: .orange)
+                
+                if controller.groundAvoid {
+                    Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
                 }
-                .padding(.vertical, 3)
-                .padding(.horizontal, 8)
-                .frame(maxWidth: .infinity)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            }
+            .padding(.vertical, 3)
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
-                HStack(alignment: .top, spacing: 6) {
-                    metric("MASS FLOW",
-                           String(format:" %.1f kg/s",  controller.measuredFlow))
-                    metric("ALT", String(format: "%.0f m", controller.flightAltitude))
-                    metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed))
-                    metric("MACH", String(format: "%.2f", controller.flightMach))
-       
-                    if controller.groundAvoid {
-                        Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
-                    }
+            HStack(alignment: .top, spacing: 6) {
+                metric("MASS FLOW", String(format: "%.1f kg/s", controller.measuredFlow), color: .cyan)
+                metric("ALT", String(format: "%.0f m", controller.flightAltitude), color: .yellow)
+                metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed), color: .orange)
+                metric("MACH", String(format: "%.2f", controller.flightMach), color: .pink)
+   
+                if controller.groundAvoid {
+                    Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
                 }
             }
         }
+    }
 
     var bottomBar: some View {
         VStack(spacing: 4) {
@@ -226,10 +203,10 @@ struct BladelessTurbineView: View {
         }
     }
 
-    func metric(_ label: String, _ value: String) -> some View {
+    func metric(_ label: String, _ value: String, color: Color = .white) -> some View {
         VStack(spacing: 0) {
             Text(label).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 11, weight: .semibold, design: .monospaced))
+            Text(value).font(.system(size: 11, weight: .semibold, design: .monospaced)).foregroundStyle(color)
         }
         .frame(maxWidth: .infinity)
     }
