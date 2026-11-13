@@ -10,6 +10,7 @@ import UIKit
 import simd
 
 final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, ObservableObject {
+    private static let ringSpacing: Float = 300.0
     private let wingNode = SCNNode()
     private let wingMaterial = SCNMaterial()
     @Published var stations: [PressureStation] = []
@@ -42,6 +43,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var groundAvoid = false
     @Published var recoveryActive = false
     @Published var canyonReturn = false
+    @Published var score: Int = 0
     @Published var orbitPercent: Int = 0
     /// true: camera sits close to the left of the engine (whole engine in view); false: chase view.
     @Published var sideCamera = false {
@@ -70,6 +72,18 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     private let terrainNode = SCNNode()
     private let splineNode = SCNNode()
     private var splineAnchorX: Float = .greatestFiniteMagnitude
+    private let ringsRootNode = SCNNode()
+    private struct CanyonRing {
+        let index: Int
+        let center: SIMD3<Float>
+        let normal: SIMD3<Float>
+        let radius: Float
+        let node: SCNNode
+        var scored: Bool = false
+    }
+    private var canyonRings: [Int: CanyonRing] = [:]
+    private var previousFlightPosition: SIMD3<Float>?
+    private static let ringRadius: Float = 38.0
     private let turbineSpinNode = SCNNode()
     private let compressorSpinNode = SCNNode()
     private let fanSpinNode = SCNNode()
@@ -110,6 +124,14 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         sim.reset()
         flight.reset()
         accumulator = 0
+        previousFlightPosition = nil
+        for ring in canyonRings.values {
+            ring.node.removeFromParentNode()
+        }
+        canyonRings.removeAll()
+        DispatchQueue.main.async { [weak self] in
+            self?.score = 0
+        }
         for n in particleNodes { n.isHidden = true }
         for i in 0..<lastBand.count { lastBand[i] = -1 }
     }
@@ -164,6 +186,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
         scene.rootNode.addChildNode(terrainNode)
         scene.rootNode.addChildNode(splineNode)
+        scene.rootNode.addChildNode(ringsRootNode)
         scene.rootNode.addChildNode(flightNode)
         engineRoot.scale = SCNVector3(0.8, 0.8, 0.8)      // ≈ 5 m long
         engineRoot.eulerAngles.y = .pi                    // intake faces the flight direction, exhaust trails
@@ -434,6 +457,160 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         splineNode.addChildNode(lineNode(guide, color: .systemYellow))     // variable flight path
     }
 
+    // MARK: Canyon Scoring Rings
+
+    private func makeScoringRingNode(center: SIMD3<Float>, normal: SIMD3<Float>, radius: Float) -> SCNNode {
+        let torus = SCNTorus(ringRadius: CGFloat(radius), pipeRadius: 2.2)
+        torus.ringSegmentCount = 48
+        torus.pipeSegmentCount = 12
+
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = UIColor.systemYellow
+        mat.emission.contents = UIColor.systemOrange
+        mat.transparency = 0.88
+        torus.firstMaterial = mat
+
+        let node = SCNNode(geometry: torus)
+        node.simdPosition = center
+        // SCNTorus lies in the XZ plane with its hole axis along +Y; rotate +Y to align with the canyon tangent.
+        node.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: simd_normalize(normal))
+        return node
+    }
+
+    private func updateScoringRings(
+            prevPos: SIMD3<Float>,
+            currPos: SIMD3<Float>
+        ) {
+            let spacing = Self.ringSpacing
+            let currentIndex = Int(floor(currPos.x / spacing))
+
+            // Maintain rings in both directions so turning around still works.
+            let ringsEachDirection = 24
+            let minimumIndex = currentIndex - ringsEachDirection
+            let maximumIndex = currentIndex + ringsEachDirection
+
+            func ringCenter(at x: Float) -> SIMD3<Float> {
+                let path = Terrain.canyonVariablePath(x)
+                let floorY = Terrain.height(path.x, path.z)
+
+                // Preserve your existing canyon midpoint-height convention.
+                let rimY: Float = 1240.0
+                let centerY = floorY + (rimY - floorY) * 0.5
+
+                return SIMD3<Float>(path.x, centerY, path.z)
+            }
+
+            // 1. Continuously fill missing ring positions.
+            for index in minimumIndex...maximumIndex {
+                guard canyonRings[index] == nil else { continue }
+
+                let x = Float(index) * spacing
+                let center = ringCenter(at: x)
+
+                // Include elevation changes when aligning the ring.
+                let before = ringCenter(at: x - 25.0)
+                let after = ringCenter(at: x + 25.0)
+                let direction = after - before
+
+                let normal: SIMD3<Float>
+                if simd_length_squared(direction) > 0.0001 {
+                    normal = simd_normalize(direction)
+                } else {
+                    normal = SIMD3<Float>(1, 0, 0)
+                }
+
+                let node = makeScoringRingNode(
+                    center: center,
+                    normal: normal,
+                    radius: Self.ringRadius
+                )
+
+                ringsRootNode.addChildNode(node)
+
+                canyonRings[index] = CanyonRing(
+                    index: index,
+                    center: center,
+                    normal: normal,
+                    radius: Self.ringRadius,
+                    node: node
+                )
+            }
+
+            // 2. Check if the engine intersects any portion of the ring.
+            for (index, ring) in canyonRings where !ring.scored {
+                // Distance from the aircraft's current position to the ring's center point
+                let distanceToCenter = simd_distance(currPos, ring.center)
+                
+                // Define an approximate radius for the engine/jet body boundary (e.g., ~5 meters)
+                let engineRadius: Float = 5.0
+                
+                // Check if any part of the engine intersects the ring's opening
+                if distanceToCenter <= (ring.radius + engineRadius) {
+                    let vPrev = prevPos - ring.center
+                    let vCurr = currPos - ring.center
+                    let dPrev = simd_dot(vPrev, ring.normal)
+                    let dCurr = simd_dot(vCurr, ring.normal)
+                    
+                    // Trigger if it crosses the plane or passes tightly through the boundary
+                    if dPrev * dCurr <= 0 || distanceToCenter <= ring.radius {
+                        canyonRings[index]?.scored = true
+                        
+                        // Spawn the particle burst/explosion effect
+                        spawnRingBurst(at: ring.center)
+                        
+                        // Increment score on the main thread
+                        DispatchQueue.main.async { [weak self] in
+                            self?.score += 100
+                        }
+                    }
+                }
+            }
+
+            // 3. Remove distant rings in either direction.
+            let expiredIndices = canyonRings.keys.filter {
+                $0 < minimumIndex || $0 > maximumIndex
+            }
+
+            for index in expiredIndices {
+                canyonRings[index]?.node.removeFromParentNode()
+                canyonRings.removeValue(forKey: index)
+            }
+        }
+
+    private func spawnRingBurst(at position: SIMD3<Float>) {
+        let burstNode = SCNNode()
+        burstNode.simdPosition = position
+
+        let particleSystem = SCNParticleSystem()
+        particleSystem.particleColor = UIColor.systemGreen
+        particleSystem.particleSize = 0.8
+        particleSystem.birthRate = 350
+        particleSystem.emissionDuration = 0.08
+        particleSystem.loops = false
+
+        particleSystem.particleLifeSpan = 0.6
+        particleSystem.particleVelocity = 45.0
+        particleSystem.particleVelocityVariation = 15.0
+        particleSystem.spreadingAngle = 180.0
+        particleSystem.blendMode = .additive
+
+        // Uses SceneKit's default particle appearance.
+        // Set particleImage here if you have a custom texture.
+
+        burstNode.addParticleSystem(particleSystem)
+        scene.rootNode.addChildNode(burstNode)
+
+        let cleanupDelay = particleSystem.emissionDuration
+            + TimeInterval(particleSystem.particleLifeSpan)
+            + 0.1
+
+        burstNode.runAction(.sequence([
+            .wait(duration: cleanupDelay),
+            .removeFromParentNode()
+        ]))
+    }
+
     // MARK: Streaming terrain
 
     private struct TileKey: Hashable { let x: Int, z: Int }
@@ -670,11 +847,15 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
         // MARK: - Aircraft Flight Physics
 
+        let prevPos = previousFlightPosition ?? flight.position
+
         // FlightSim receives the latest engine cycle.
         flight.step(
             dt: frame,
             cycle: sim.cycle
         )
+
+        previousFlightPosition = flight.position
 
         // MARK: - Engine / Aircraft Transform
 
@@ -682,10 +863,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
         flightNode.simdPosition = flight.position
         flightNode.simdOrientation = flight.orientation
 
-        // MARK: - Terrain and Flight Path
+        // MARK: - Terrain, Flight Path, and Scoring Rings
 
         updateTerrain()
         updateSplines()
+        updateScoringRings(prevPos: prevPos, currPos: flight.position)
 
         // MARK: - Camera
 

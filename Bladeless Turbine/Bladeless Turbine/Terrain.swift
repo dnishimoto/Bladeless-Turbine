@@ -96,9 +96,9 @@ enum Terrain {
 
     // MARK: - Flight Corridor and Spline Paths
 
-    static let canyonPathHalfWidth: Float = 220.0
-    static let canyonRecoveryMargin: Float = 35.0
-    static let canyonVariationAmplitude: Float = 125.0
+    static let canyonPathHalfWidth: Float = 420.0    // Increased width for the flight corridor
+    static let canyonRecoveryMargin: Float = 60.0
+    static let canyonVariationAmplitude: Float = 180.0
 
     static func canyonCenterZ(_ x: Float) -> Float {
         mainCanyonCenter(x)
@@ -119,7 +119,7 @@ enum Terrain {
     static func canyonVariablePath(_ x: Float) -> SIMD3<Float> {
         let offset =
             canyonVariationAmplitude * sin(x * 0.0011) +
-            35.0 * sin(x * 0.0027 + 1.2)
+            45.0 * sin(x * 0.0027 + 1.2)
         let limit = canyonPathHalfWidth - canyonRecoveryMargin
         let safeOffset = max(-limit, min(limit, offset))
         return SIMD3<Float>(x, 0, canyonCenterZ(x) + safeOffset)
@@ -268,15 +268,15 @@ enum Terrain {
             erosion * 30.0 +
             detail * 7.0
 
-        // Main canyon.
+        // Main canyon (wider physical cut).
         let mainCenter = mainCanyonCenter(x)
 
         let mainCut = canyonCut(
             x: x,
             z: z,
             center: mainCenter,
-            floorWidth: 180.0,
-            wallWidth: 1050.0,
+            floorWidth: 320.0,    // Increased floor width (was 180.0)
+            wallWidth: 1400.0,    // Increased wall spread width (was 1050.0)
             depth: 760.0
         )
 
@@ -323,7 +323,7 @@ enum Terrain {
 
         let wallFactor = max(
             0.0,
-            1.0 - distanceFromCanyon / 1050.0
+            1.0 - distanceFromCanyon / 1400.0
         )
 
         let strata =
