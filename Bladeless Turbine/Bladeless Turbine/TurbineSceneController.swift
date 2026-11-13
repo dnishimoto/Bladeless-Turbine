@@ -494,7 +494,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 let path = Terrain.canyonVariablePath(x)
                 let floorY = Terrain.height(path.x, path.z)
 
-                // Preserve your existing canyon midpoint-height convention.
                 let rimY: Float = 1240.0
                 let centerY = floorY + (rimY - floorY) * 0.5
 
@@ -508,7 +507,6 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 let x = Float(index) * spacing
                 let center = ringCenter(at: x)
 
-                // Include elevation changes when aligning the ring.
                 let before = ringCenter(at: x - 25.0)
                 let after = ringCenter(at: x + 25.0)
                 let direction = after - before
@@ -537,26 +535,25 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 )
             }
 
-            // 2. Check if the engine intersects any portion of the ring.
+            // 2. Check if the engine passes through any active ring.
             for (index, ring) in canyonRings where !ring.scored {
-                // Distance from the aircraft's current position to the ring's center point
-                let distanceToCenter = simd_distance(currPos, ring.center)
+                // Vector from ring center to previous and current positions
+                let vPrev = prevPos - ring.center
+                let vCurr = currPos - ring.center
                 
-                // Define an approximate radius for the engine/jet body boundary (e.g., ~5 meters)
-                let engineRadius: Float = 5.0
-                
-                // Check if any part of the engine intersects the ring's opening
-                if distanceToCenter <= (ring.radius + engineRadius) {
-                    let vPrev = prevPos - ring.center
-                    let vCurr = currPos - ring.center
-                    let dPrev = simd_dot(vPrev, ring.normal)
-                    let dCurr = simd_dot(vCurr, ring.normal)
-                    
-                    // Trigger if it crosses the plane or passes tightly through the boundary
-                    if dPrev * dCurr <= 0 || distanceToCenter <= ring.radius {
+                let dPrev = simd_dot(vPrev, ring.normal)
+                let dCurr = simd_dot(vCurr, ring.normal)
+
+                // Check if the aircraft crossed the ring plane (sign change of dot product)
+                if dPrev * dCurr <= 0 {
+                    let intersectionPoint = currPos // Approximate intersection point
+                    let distanceFromCenter = simd_distance(intersectionPoint, ring.center)
+
+                    // Verify if the engine passed through the ring's opening
+                    if distanceFromCenter <= ring.radius {
                         canyonRings[index]?.scored = true
                         
-                        // Spawn the particle burst/explosion effect
+                        // Trigger particle burst at the ring center
                         spawnRingBurst(at: ring.center)
                         
                         // Increment score on the main thread

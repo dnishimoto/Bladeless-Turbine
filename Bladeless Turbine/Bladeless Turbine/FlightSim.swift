@@ -41,6 +41,11 @@ final class FlightSim {
     var stickPitch: Float = 0
     var rudder: Float = 0
 
+    // MARK: - Smoothed Pilot Controls
+
+    private var filteredStickRoll: Float = 0
+    private var filteredStickPitch: Float = 0
+
     // MARK: - Flight State
 
     private(set) var groundAvoid = false
@@ -84,9 +89,21 @@ final class FlightSim {
 
     // MARK: - Pilot Response
 
-    static let maxPilotBank: Float = 1.40
-    static let rollResponse: Float = 7.0
-    static let stickYawRate: Float = 0.45
+    // MARK: - Pilot Response
+
+        static let maxPilotBank: Float = 1.05          // ~60° max bank (up from 43°)
+        static let rollResponse: Float = 5.0           // crisper roll tracking
+        static let stickYawRate: Float = 0.32          // stronger coordinated rudder assist
+
+        // Joystick response tuning
+        static let rollSensitivity: Float = 0.75       // stronger left/right authority
+        static let pitchSensitivity: Float = 0.40      // keeps pitch smooth and gradual
+        static let stickDeadZone: Float = 0.06
+        static let stickExpo: Float = 1.6
+        static let stickSmoothingTime: Float = 0.20
+
+    // Joystick response tuning
+    static let stickSensitivity: Float = 0.40
 
     private let gravity: Float = 9.80665
 
@@ -178,6 +195,51 @@ final class FlightSim {
         ).squareRoot()
     }
 
+    // MARK: - Joystick Input Processing
+
+    private func shapeStickInput(_ input: Float) -> Float {
+
+        let value = max(-1.0, min(1.0, input))
+
+        let magnitude = abs(value)
+
+        // Ignore accidental small movements.
+        if magnitude < Self.stickDeadZone {
+            return 0
+        }
+
+        // Normalize remaining movement.
+        let normalized = (
+            magnitude - Self.stickDeadZone
+        ) / (1.0 - Self.stickDeadZone)
+
+        // Progressive response:
+        // Small movements provide finer aircraft control.
+        let shaped = pow(normalized, Self.stickExpo)
+
+        return (value < 0 ? -1 : 1)
+            * shaped
+            * Self.stickSensitivity
+    }
+
+    private func updateSmoothedStick(dt: Float) {
+
+        let targetRoll = shapeStickInput(stickRoll)
+        let targetPitch = shapeStickInput(stickPitch)
+
+        let alpha = 1.0 - exp(
+            -dt / Self.stickSmoothingTime
+        )
+
+        filteredStickRoll += (
+            targetRoll - filteredStickRoll
+        ) * alpha
+
+        filteredStickPitch += (
+            targetPitch - filteredStickPitch
+        ) * alpha
+    }
+
     // MARK: - Reset
 
     func reset() {
@@ -200,6 +262,9 @@ final class FlightSim {
         stickRoll = 0
         stickPitch = 0
         rudder = 0
+
+        filteredStickRoll = 0
+        filteredStickPitch = 0
 
         groundAvoid = false
         recoveryActive = false
@@ -687,10 +752,12 @@ final class FlightSim {
 
         var rotationStack = AircraftLocalRotationStack()
 
+        // Process joystick input once per simulation frame.
+        updateSmoothedStick(dt: dt)
+
         // MARK: - 1. ROLL
 
-        let rollInput: Float =
-            abs(stickRoll) > 0.01 ? stickRoll : 0
+        let rollInput = filteredStickRoll
 
         let pilotBankTarget =
             rollInput *
@@ -729,15 +796,15 @@ final class FlightSim {
 
         let pilotYawAngle = (
             -rudderInput * cfg.maxYawRate -
-            rollInput * Self.stickYawRate
+            filteredStickRoll * Self.stickYawRate
         ) * dt
 
         rotationStack.pushYaw(pilotYawAngle)
 
         // MARK: - 3. PITCH
 
-        let pitchInput: Float = recovery?.pitch ??
-            (abs(stickPitch) > 0.01 ? stickPitch : 0)
+        let pitchInput: Float =
+            recovery?.pitch ?? filteredStickPitch
 
         let pitchAngle =
             pitchInput * cfg.maxPitchRate * dt
