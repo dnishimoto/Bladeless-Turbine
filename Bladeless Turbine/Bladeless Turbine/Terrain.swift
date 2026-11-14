@@ -226,6 +226,28 @@ enum Terrain {
         return depth * profile
     }
 
+    // MARK: - Checkpoint mountains
+    //
+    // Scoring rings are 300 m apart along the canyon (x axis) and every 5th ring is a checkpoint,
+    // so checkpoints are 1500 m apart. A mountain rises across the canyon after every 5th
+    // checkpoint (every 7500 m); the jet has to climb over it.
+
+    static let ringSpacingX: Float = 300
+    static let checkpointRingStride = 5
+    static let mountainPeriod: Float = ringSpacingX * Float(checkpointRingStride) * 5   // 7500 m
+    static let mountainOffset: Float = 750            // centre, past the 5th checkpoint
+    static let mountainHeight: Float = 950            // added on top of the terrain
+    static let mountainSigma: Float = 380             // half-length of the hill along x
+
+    /// Height added by the mountain nearest to x (0 away from mountains and before the first one).
+    static func mountainBump(_ x: Float) -> Float {
+        let k = ((x - mountainOffset) / mountainPeriod).rounded()
+        guard k >= 1 else { return 0 }
+        let d = (x - (k * mountainPeriod + mountainOffset)) / mountainSigma
+        guard abs(d) < 3 else { return 0 }
+        return mountainHeight * exp(-d * d)
+    }
+
     // MARK: - Terrain Height
 
     static func height(
@@ -340,6 +362,9 @@ enum Terrain {
         )
 
         terrainHeight += wallRoughness * 13.0 * wallFactor
+
+        // Checkpoint mountain across the whole canyon, every 5 checkpoints.
+        terrainHeight += mountainBump(x)
 
         // Keep the terrain above the canyon's lower limit.
         return max(65.0, terrainHeight)
@@ -848,6 +873,4 @@ extension Terrain {
         return node
     }
 }
-
-
 

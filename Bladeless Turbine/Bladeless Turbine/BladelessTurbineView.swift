@@ -136,7 +136,7 @@ struct BladelessTurbineView: View {
                 metric("MASS FLOW", String(format: "%.1f kg/s", controller.massFlow), color: .red)
             }
             .padding(.vertical, 3)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 16)
             .frame(maxWidth: .infinity)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
@@ -150,14 +150,14 @@ struct BladelessTurbineView: View {
                     Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
                 }
             }
+            .padding(.horizontal, 16)
             .padding(.vertical, 3)
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
 
             HStack(alignment: .top, spacing: 6) {
-                metric("MASS FLOW", String(format: "%.1f kg/s", controller.measuredFlow), color: .cyan)
-                metric("ALT", String(format: "%.0f m", controller.flightAltitude), color: .yellow)
+                   metric("ALT", String(format: "%.0f m", controller.flightAltitude), color: .yellow)
                 metric("SPEED", String(format: "%.0f m/s", controller.flightSpeed), color: .orange)
                 metric("MACH", String(format: "%.2f", controller.flightMach), color: .pink)
    
@@ -165,7 +165,7 @@ struct BladelessTurbineView: View {
                     Text("PULL UP").font(.system(size: 10, weight: .heavy)).foregroundStyle(.red)
                 }
             }
-        }
+        }.padding(.horizontal, 16)
     }
 
     var bottomBar: some View {

@@ -44,6 +44,11 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     @Published var recoveryActive = false
     @Published var canyonReturn = false
     @Published var score: Int = 0
+    /// Seconds left to reach the next checkpoint flag for the time bonus.
+    @Published var checkpointTimeLeft: Float = 0
+    @Published var checkpointsReached: Int = 0
+    /// Last scoring event, e.g. "+250 FLAG +120 TIME" or "-250 TERRAIN HIT".
+    @Published var lastAward: String = ""
     @Published var orbitPercent: Int = 0
     /// true: camera sits close to the left of the engine (whole engine in view); false: chase view.
     @Published var sideCamera = false {
@@ -73,17 +78,30 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
     private let splineNode = SCNNode()
     private var splineAnchorX: Float = .greatestFiniteMagnitude
     private let ringsRootNode = SCNNode()
-    struct CanyonRing {
+    private struct CanyonRing {
         let index: Int
         let center: SIMD3<Float>
         let normal: SIMD3<Float>
         let radius: Float
         let node: SCNNode
+        let isCheckpoint: Bool
         var scored: Bool = false
     }
-    var canyonRings: [Int: CanyonRing] = [:]
+    private var canyonRings: [Int: CanyonRing] = [:]
     private var previousFlightPosition: SIMD3<Float>?
     private static let ringRadius: Float = 38.0
+
+    // Checkpoint flags, timing and terrain penalty.
+    private static let checkpointTimeLimit: Float = 25      // s allowed between flags for the bonus
+    private static let firstCheckpointTime: Float = 40      // s allowed for the first flag
+    private static let ringPoints = 100
+    private static let flagPoints = 250
+    private static let flagTimeBonusPerSecond = 20
+    private static let terrainPenalty = 250
+    private var scoreClock: Float = 0
+    private var checkpointDeadline: Float = TurbineSceneController.firstCheckpointTime
+    private var wasOnGround = false
+    private var lastCrashClock: Float = -10
     private let turbineSpinNode = SCNNode()
     private let compressorSpinNode = SCNNode()
     private let fanSpinNode = SCNNode()
@@ -129,8 +147,14 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             ring.node.removeFromParentNode()
         }
         canyonRings.removeAll()
+        scoreClock = 0
+        checkpointDeadline = Self.firstCheckpointTime
+        wasOnGround = false
+        lastCrashClock = -10
         DispatchQueue.main.async { [weak self] in
             self?.score = 0
+            self?.checkpointsReached = 0
+            self?.lastAward = ""
         }
         for n in particleNodes { n.isHidden = true }
         for i in 0..<lastBand.count { lastBand[i] = -1 }
@@ -459,29 +483,63 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
     // MARK: Canyon Scoring Rings
 
-    private func makeScoringRingNode(center: SIMD3<Float>, normal: SIMD3<Float>, radius: Float) -> SCNNode {
-        let torus = SCNTorus(ringRadius: CGFloat(radius), pipeRadius: 2.2)
-        torus.ringSegmentCount = 48
-        torus.pipeSegmentCount = 12
-
-        let mat = SCNMaterial()
-        mat.lightingModel = .constant
-        mat.diffuse.contents = UIColor.systemYellow
-        mat.emission.contents = UIColor.systemOrange
-        mat.transparency = 0.88
-        torus.firstMaterial = mat
-
-        let node = SCNNode(geometry: torus)
-        node.simdPosition = center
-        // SCNTorus lies in the XZ plane with its hole axis along +Y; rotate +Y to align with the canyon tangent.
-        node.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: simd_normalize(normal))
-        return node
+    /// Deterministic 0…1 hash of a ring index (stable across runs and tile streaming).
+    private static func ringHash(_ index: Int) -> Float {
+        var n = UInt32(truncatingIfNeeded: index) &* 2_654_435_761
+        n ^= n >> 15
+        n = n &* 2_246_822_519
+        n ^= n >> 13
+        return Float(n % 1000) / 1000
     }
 
-    private func updateScoringRings(
-            prevPos: SIMD3<Float>,
-            currPos: SIMD3<Float>
-        ) {
+    /// Container at the ring centre (no rotation): the torus, tilted to face along the canyon, and
+        /// for checkpoints a pole with a flag standing on top of the ring.
+        private func makeScoringRingNode(center: SIMD3<Float>, normal: SIMD3<Float>,
+                                         radius: Float, isCheckpoint: Bool) -> SCNNode {
+            let container = SCNNode()
+            container.simdPosition = center
+
+            let torus = SCNTorus(ringRadius: CGFloat(radius), pipeRadius: isCheckpoint ? 3.0 : 2.2)
+            torus.ringSegmentCount = 48
+            torus.pipeSegmentCount = 12
+
+            let mat = SCNMaterial()
+            mat.lightingModel = .constant
+            mat.diffuse.contents = UIColor.systemGreen
+            mat.emission.contents = UIColor.systemTeal
+            mat.transparency = 0.88
+            torus.firstMaterial = mat
+
+            let ringNode = SCNNode(geometry: torus)
+            // SCNTorus lies in the XZ plane with its hole axis along +Y; rotate +Y to the canyon tangent.
+            ringNode.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: simd_normalize(normal))
+            container.addChildNode(ringNode)
+
+            if isCheckpoint {
+                let poleHeight: Float = 46
+                let pole = SCNCylinder(radius: 0.9, height: CGFloat(poleHeight))
+                let poleMat = SCNMaterial()
+                poleMat.lightingModel = .constant
+                poleMat.diffuse.contents = UIColor.white
+                pole.firstMaterial = poleMat
+                let poleNode = SCNNode(geometry: pole)
+                poleNode.simdPosition = SIMD3<Float>(0, radius + poleHeight / 2, 0)
+                container.addChildNode(poleNode)
+
+                let flag = SCNBox(width: 0.6, height: 12, length: 22, chamferRadius: 0)
+                let flagMat = SCNMaterial()
+                flagMat.lightingModel = .constant
+                flagMat.diffuse.contents = UIColor.systemRed
+                flagMat.emission.contents = UIColor.systemRed
+                flag.firstMaterial = flagMat
+                let flagNode = SCNNode(geometry: flag)
+                // Flag hangs off the pole, flat side facing the canyon tangent.
+                flagNode.simdPosition = SIMD3<Float>(0, radius + poleHeight - 6, 12)
+                container.addChildNode(flagNode)
+            }
+            return container
+        }
+    private func updateScoringRings(prevPos: SIMD3<Float>, currPos: SIMD3<Float>) {
             let spacing = Self.ringSpacing
             let currentIndex = Int(floor(currPos.x / spacing))
 
@@ -490,107 +548,124 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             let minimumIndex = currentIndex - ringsEachDirection
             let maximumIndex = currentIndex + ringsEachDirection
 
-            func ringCenter(at x: Float) -> SIMD3<Float> {
+            // Point on the canyon floor line (includes any mountain on top of the terrain).
+            func ringBase(at x: Float) -> SIMD3<Float> {
                 let path = Terrain.canyonVariablePath(x)
-                let floorY = Terrain.height(path.x, path.z)
-
-                let rimY: Float = 1240.0
-                let centerY = floorY + (rimY - floorY) * 0.5
-
-                return SIMD3<Float>(path.x, centerY, path.z)
+                return SIMD3<Float>(path.x, Terrain.height(path.x, path.z), path.z)
             }
 
-            // 1. Continuously fill missing ring positions.
+            // 1. Fill missing ring positions, each at its own height above the ground.
             for index in minimumIndex...maximumIndex {
                 guard canyonRings[index] == nil else { continue }
 
                 let x = Float(index) * spacing
-                let center = ringCenter(at: x)
+                let base = ringBase(at: x)
 
-                let before = ringCenter(at: x - 25.0)
-                let after = ringCenter(at: x + 25.0)
-                let direction = after - before
+                // Heights vary from 90 m to 420 m above the local ground, so the jet has to climb and
+                // dive between rings (and climbs over the mountains, whose rings ride up the slope).
+                let height = 90 + Self.ringHash(index) * 330
+                let center = SIMD3<Float>(base.x, base.y + height, base.z)
 
-                let normal: SIMD3<Float>
-                if simd_length_squared(direction) > 0.0001 {
-                    normal = simd_normalize(direction)
-                } else {
-                    normal = SIMD3<Float>(1, 0, 0)
-                }
+                // Face along the canyon (horizontal tangent), independent of the height variation.
+                var direction = ringBase(at: x + 25) - ringBase(at: x - 25)
+                direction.y = 0
+                let normal = simd_length_squared(direction) > 0.0001
+                    ? simd_normalize(direction) : SIMD3<Float>(1, 0, 0)
 
-                let node = makeScoringRingNode(
-                    center: center,
-                    normal: normal,
-                    radius: Self.ringRadius
-                )
-
+                let isCheckpoint = index % Terrain.checkpointRingStride == 0
+                let node = makeScoringRingNode(center: center, normal: normal,
+                                               radius: Self.ringRadius, isCheckpoint: isCheckpoint)
                 ringsRootNode.addChildNode(node)
 
-                canyonRings[index] = CanyonRing(
-                    index: index,
-                    center: center,
-                    normal: normal,
-                    radius: Self.ringRadius,
-                    node: node
-                )
+                canyonRings[index] = CanyonRing(index: index, center: center, normal: normal,
+                                                radius: Self.ringRadius, node: node,
+                                                isCheckpoint: isCheckpoint)
             }
 
-            // 2. Check if the engine approaches or passes through any active ring.
-            for (index, var ring) in canyonRings where !ring.scored {
-                let distanceToRing = simd_distance(currPos, ring.center)
-
-                // Turn green when approaching within 120 meters
-                if distanceToRing <= 120.0 {
-                    ring.node.geometry?.firstMaterial?.diffuse.contents = UIColor.systemGreen
-                    ring.node.geometry?.firstMaterial?.emission.contents = UIColor.systemGreen
-                }
-
-                // Vector from ring center to previous and current positions
-                let vPrev = prevPos - ring.center
-                let vCurr = currPos - ring.center
-                
-                let dPrev = simd_dot(vPrev, ring.normal)
-                let dCurr = simd_dot(vCurr, ring.normal)
-
-                // Check if the aircraft crossed the ring plane (sign change of dot product)
-                if dPrev * dCurr <= 0 {
-                    let distanceFromCenter = simd_distance(currPos, ring.center)
-
-                    // Verify if the engine passed through the ring's opening
-                    if distanceFromCenter <= ring.radius {
-                        ring.scored = true
+            // 2. Dynamically update ring colors based on close proximity to the engine
+            for (_, ring) in canyonRings {
+                if let torusNode = ring.node.childNodes.first,
+                   let material = torusNode.geometry?.firstMaterial {
+                    
+                    if ring.scored {
+                        material.diffuse.contents = UIColor.systemYellow
+                        material.emission.contents = UIColor.systemOrange
+                    } else {
+                        // Check if the engine is close to the ring (e.g., within 150 meters)
+                        let distanceAhead = ring.center.x - currPos.x
+                        let isCloseTarget = distanceAhead >= 0 && distanceAhead <= 150.0
                         
-                        // Ensure it's green and trigger celebration effects
-                        ring.node.geometry?.firstMaterial?.diffuse.contents = UIColor.systemGreen
-                        ring.node.geometry?.firstMaterial?.emission.contents = UIColor.systemGreen
-                        
-                        canyonRings[index] = ring
-                        
-                        // Trigger particle burst at the ring center
-                        spawnRingBurst(at: ring.center)
-                        
-                        // Increment score on the main thread
-                        DispatchQueue.main.async { [weak self] in
-                            self?.score += 100
+                        if isCloseTarget {
+                            // Engine is close and about to pass through -> GREEN
+                            material.diffuse.contents = UIColor.systemGreen
+                            material.emission.contents = UIColor.systemTeal
+                        } else {
+                            // Farther away -> Yellow/Orange
+                            material.diffuse.contents = UIColor.systemYellow
+                            material.emission.contents = UIColor.systemOrange
                         }
                     }
                 }
-                
-                // Save any state changes back to the dictionary
-                canyonRings[index] = ring
             }
 
-            // 3. Remove distant rings in either direction.
-            let expiredIndices = canyonRings.keys.filter {
-                $0 < minimumIndex || $0 > maximumIndex
+            // 3. Score: did the jet cross a ring's plane inside its opening?
+            for (index, ring) in canyonRings where !ring.scored {
+                let dPrev = simd_dot(prevPos - ring.center, ring.normal)
+                let dCurr = simd_dot(currPos - ring.center, ring.normal)
+                guard dPrev * dCurr <= 0, abs(dPrev - dCurr) > 1e-4 else { continue }
+
+                // Where the flight path actually crossed the ring plane.
+                let t = dPrev / (dPrev - dCurr)
+                let crossing = prevPos + (currPos - prevPos) * t
+                guard simd_distance(crossing, ring.center) <= ring.radius else { continue }
+
+                canyonRings[index]?.scored = true
+                spawnRingBurst(at: ring.center)
+
+                var points = Self.ringPoints
+                var text = "+\(Self.ringPoints) RING"
+                var reached = false
+                if ring.isCheckpoint {
+                    reached = true
+                    points = Self.flagPoints
+                    text = "+\(Self.flagPoints) FLAG"
+                    let secondsLeft = checkpointDeadline - scoreClock
+                    if secondsLeft > 0 {
+                        let bonus = Int(secondsLeft) * Self.flagTimeBonusPerSecond
+                        points += bonus
+                        text += " +\(bonus) TIME"
+                    }
+                    checkpointDeadline = scoreClock + Self.checkpointTimeLimit
+                }
+                let award = points, message = text, flagged = reached
+                DispatchQueue.main.async { [weak self] in
+                    self?.score += award
+                    self?.lastAward = message
+                    if flagged { self?.checkpointsReached += 1 }
+                }
             }
 
-            for index in expiredIndices {
+            // 4. Remove distant rings in either direction.
+            let expired = canyonRings.keys.filter { $0 < minimumIndex || $0 > maximumIndex }
+            for index in expired {
                 canyonRings[index]?.node.removeFromParentNode()
                 canyonRings.removeValue(forKey: index)
             }
         }
-
+    /// Terrain hit: deduct points once per contact (at most every 1.5 s).
+    private func checkTerrainHit() {
+        let onGround = flight.groundAvoid        // true while the jet is pushed up off the ground
+        if onGround && !wasOnGround && scoreClock - lastCrashClock > 1.5 {
+            lastCrashClock = scoreClock
+            let penalty = Self.terrainPenalty
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.score = max(0, self.score - penalty)
+                self.lastAward = "-\(penalty) TERRAIN HIT"
+            }
+        }
+        wasOnGround = onGround
+    }
 
     private func spawnRingBurst(at position: SIMD3<Float>) {
         let burstNode = SCNNode()
@@ -881,7 +956,9 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
 
         updateTerrain()
         updateSplines()
+        scoreClock += frame
         updateScoringRings(prevPos: prevPos, currPos: flight.position)
+        checkTerrainHit()
 
         // MARK: - Camera
 
@@ -968,6 +1045,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
             let fGCAS = fs.groundAvoid
             let fRecovery = fs.recoveryActive
             let fCanyon = fs.canyonReturnActive
+            let tLeft = max(0, checkpointDeadline - scoreClock)
 
             let net = cyc.turbineTorque
                 - cyc.compressorTorque
@@ -1023,6 +1101,7 @@ final class TurbineSceneController: NSObject, SCNSceneRendererDelegate, Observab
                 self.recoveryActive = fRecovery
                 self.canyonReturn = fCanyon
                 self.netTorque = net
+                self.checkpointTimeLeft = tLeft
             }
         }
     }
